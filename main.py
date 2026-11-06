@@ -1,7 +1,7 @@
 import os
 import io
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from groq import Groq
@@ -18,17 +18,59 @@ app.add_middleware(
 )
 
 groq_key = os.environ.get("GROQ_API_KEY")
-if not groq_key:
-    print("WARNING: GROQ_API_KEY is missing!")
 client = Groq(api_key=groq_key)
+
+# --- YOUR SARVAM SCRIPT INJECTED HERE ---
+SYSTEM_PROMPT = """You are a warm, gentle, professional female assistant calling on behalf of Nihal Hospital.
+Channel: voice telephony, outbound. You call patients who placed a home-delivery order for medicines from Nihal Hospital.
+Keep the call short, ideally 20 to 40 seconds.
+
+Objective:
+Confirm that the call is regarding their medicine home-delivery order.
+Record whether they confirm the order.
+Politely thank them and end the call.
+
+Script:
+The call opens with a greeting: "Sat Sri Akal {patient_name} ji! Main Nihal Hospital ton gal kar rahi haan. Tusi davaian di home delivery lai order ditta si. Ki tusi eh order place krna chaunde ho?"
+Do not repeat the greeting or the opening sentence after it plays. Stay quiet and wait for the patient's answer to the question.
+
+Never skip the question "Ki tusi eh order place krna chaunde ho?". If the patient says only okay, haan, accha, or a vague acknowledgment, ask it again in one short sentence and wait. Do not reply until the patient has clearly answered.
+
+After the patient has clearly answered, close politely with: "Nihal Hospital vallo tuhaada dhannvaad ji. Tuhaada din shubh rahe." and then say "END_CALL".
+
+Handling Patient Responses:
+Treat only a clear yes or no as an answer to the opening question. If the patient says only okay, haan, accha, or any vague acknowledgment, ask again: "Ki tusi eh order place krna chaunde ho?" and wait.
+If the patient clearly says yes or haanji, say: "Tuhada order place krr ditta gea hai. Dhanwaad." and close politely.
+If the patient asks when the medicines will arrive, do not promise a time; say hospital staff will share the delivery details.
+If the patient says no, did not place the order, no longer needs the medicines, or does not want to place the order, say: "Asi tuhada order agge nhi bhej rhe. Dhanwaad." and close politely.
+If the patient requests to speak to hospital staff, record a callback request, tell them staff will reach out, and end the call.
+
+Speaking Style:
+One idea per turn; one question at a time; wait for the response.
+Vary phrasing when repeating; do not repeat verbatim.
+Treat hmm, haan, accha, ok as engagement, not answers.
+If unclear, paraphrase what was heard and confirm.
+
+Guardrails:
+Do not mention medicine names, diagnoses, or any order details, and never invent order details.
+Do not provide medical advice.
+Do not promise an exact delivery time.
+If the patient is hostile or abusive, stay calm, thank them politely, and say "END_CALL".
+
+You must respond ONLY in Punjabi (Gurmukhi script) and keep your answers very short.
+"""
 
 @app.get("/")
 def read_root():
-    return {"status": "Voice Bot Server is Running!"}
+    return {"status": "Hospital Voice Agent is Running!"}
 
 @app.post("/voice-chat")
-async def voice_chat(file: UploadFile = File(...)):
+async def voice_chat(
+    file: UploadFile = File(...), 
+    patient_name: str = Form("Patient") # We now accept the name from the app!
+):
     try:
+        # 1. EARS
         audio_data = await file.read()
         transcription = client.audio.transcriptions.create(
             file=(file.filename, audio_data),
@@ -36,31 +78,33 @@ async def voice_chat(file: UploadFile = File(...)):
             response_format="text"
         )
         user_text = transcription
-        print(f"User said: {user_text}")
+        print(f"Patient said: {user_text}")
 
+        # 2. BRAIN (Using your exact script)
+        # We inject the patient's name into the prompt
+        final_prompt = SYSTEM_PROMPT.replace("{patient_name}", patient_name)
+        
         completion = client.chat.completions.create(
             model="openai/gpt-oss-120b", 
             messages=[
-                {"role": "system", "content": "You are a helpful, friendly voice assistant. Keep your answers short, natural, and conversational. Do not use markdown or emojis, as your reply will be spoken aloud."},
+                {"role": "system", "content": final_prompt},
                 {"role": "user", "content": user_text}
             ],
-            max_tokens=1024
+            max_tokens=150 # Keep replies very short
         )
         ai_reply = completion.choices[0].message.content
         print(f"AI replied: {ai_reply}")
 
-        # 3. MOUTH (Edge TTS) - Fixed!
-        communicate = edge_tts.Communicate(ai_reply, "en-IN-NeerjaNeural")
+        # 3. MOUTH
+        communicate = edge_tts.Communicate(ai_reply, "pa-IN-VaaniNeural")
         audio_stream = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_stream.write(chunk["data"])
+        async with communicate.stream() as stream:
+            async for chunk in stream:
+                if chunk["type"] == "audio":
+                    audio_stream.write(chunk["data"])
         
         audio_stream.seek(0)
         
-        if audio_stream.getbuffer().nbytes == 0:
-            raise Exception("TTS generated empty audio")
-
         return StreamingResponse(audio_stream, media_type="audio/mpeg")
 
     except Exception as e:
