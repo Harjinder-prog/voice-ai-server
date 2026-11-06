@@ -49,7 +49,8 @@ async def voice_chat(file: UploadFile = File(...)):
         ai_reply = completion.choices[0].message.content
         print(f"AI replied: {ai_reply}")
 
-                communicate = edge_tts.Communicate(ai_reply, "en-IN-NeerjaNeural")
+        # 3. MOUTH (Edge TTS) - Fixed!
+        communicate = edge_tts.Communicate(ai_reply, "en-IN-NeerjaNeural")
         audio_stream = io.BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
@@ -67,7 +68,5 @@ async def voice_chat(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    # Read the port from the environment variable, defaulting to 7860 if not set.
     port = int(os.environ.get("PORT", 7860))
-    # Run the server on 0.0.0.0 to be accessible from outside the container.
     uvicorn.run(app, host="0.0.0.0", port=port)
