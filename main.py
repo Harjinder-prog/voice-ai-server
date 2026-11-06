@@ -30,24 +30,17 @@ Record whether they confirm the order.
 Politely thank them and end the call.
 
 Script:
-The call opens with a greeting: "Sat Sri Akal {patient_name} ji! Main Nihal Hospital ton gal kar rahi haan. Tusi davaian di home delivery lai order ditta si. Ki tusi eh order place krna chaunde ho?"
-Do not repeat the greeting or the opening sentence after it plays. Stay quiet and wait for the patient's answer to the question.
+The call opens with a greeting: "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ {patient_name} ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਤੁਸੀਂ ਦਵਾਈਆਂ ਦੀ ਹੋਮ ਡਿਲੀਵਰੀ ਲਈ ਆਰਡਰ ਦਿੱਤਾ ਸੀ। ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+Do not repeat the greeting. Stay quiet and wait for the patient's answer.
 
-Never skip the question "Ki tusi eh order place krna chaunde ho?". If the patient says only okay, haan, accha, or a vague acknowledgment, ask it again in one short sentence and wait. Do not reply until the patient has clearly answered.
-
-After the patient has clearly answered, close politely with: "Nihal Hospital vallo tuhaada dhannvaad ji. Tuhaada din shubh rahe."
+If the patient says only okay, haan, accha, or a vague acknowledgment, ask again: "ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 Handling Patient Responses:
-Treat only a clear yes or no as an answer to the opening question. If the patient says only okay, haan, accha, or any vague acknowledgment, ask again: "Ki tusi eh order place krna chaunde ho?" and wait.
-If the patient clearly says yes or haanji, say: "Tuhada order place krr ditta gea hai. Dhanwaad." and close politely.
-If the patient says no, say: "Asi tuhada order agge nhi bhej rhe. Dhanwaad." and close politely.
-If the patient says "Thank you" or speaks in English, reply in Punjabi: "Ki tusi eh order place krna chaunde ho?"
+If the patient clearly says yes or haanji, say: "ਤੁਹਾਡਾ ਆਰਡਰ ਪਲੇਸ ਕਰ ਦਿੱਤਾ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।" and close politely.
+If the patient says no, say: "ਅਸੀਂ ਤੁਹਾਡਾ ਆਰਡਰ ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।" and close politely.
+If the patient says "Thank you" or speaks in English, reply: "ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
-Speaking Style:
-One idea per turn; one question at a time; wait for the response.
-
-Guardrails:
-You must respond ONLY in Punjabi (Gurmukhi script). NEVER output an empty response. Keep your answers very short.
+CRITICAL GUARDRAIL: You must respond ONLY in Punjabi using the Gurmukhi script (e.g., ਕੀ ਤੁਸੀਂ...). NEVER use English letters or Romanized Punjabi.
 """
 
 @app.get("/")
@@ -86,26 +79,34 @@ async def voice_chat(
             max_tokens=150
         )
         
-        # SAFETY NET: Ensure ai_reply is a string and not empty
         raw_reply = completion.choices[0].message.content
         ai_reply = str(raw_reply).strip() if raw_reply else ""
         
+        # Clean up any accidental markdown
+        ai_reply = ai_reply.replace("*", "").replace("#", "").strip()
+        
         if not ai_reply:
-            # If AI gives an empty response, use this fallback question
-            ai_reply = "Ki tusi eh order place krna chaunde ho?"
+            ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
             
         print(f"AI replied: {ai_reply}")
 
-        # 3. MOUTH
-        communicate = edge_tts.Communicate(ai_reply, "pa-IN-VaaniNeural")
+        # 3. MOUTH (With Bulletproof Fallback)
         audio_stream = io.BytesIO()
-        
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_stream.write(chunk["data"])
-        
+        try:
+            communicate = edge_tts.Communicate(ai_reply, "pa-IN-VaaniNeural")
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_stream.write(chunk["data"])
+        except Exception as tts_error:
+            print(f"TTS Error with text '{ai_reply}': {tts_error}")
+            # If TTS fails, use a perfect Gurmukhi fallback question
+            fallback_text = "ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+            communicate = edge_tts.Communicate(fallback_text, "pa-IN-VaaniNeural")
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_stream.write(chunk["data"])
+
         audio_stream.seek(0)
-        
         return StreamingResponse(audio_stream, media_type="audio/mpeg")
 
     except Exception as e:
