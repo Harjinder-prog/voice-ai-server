@@ -1,5 +1,6 @@
 import os
 import io
+import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +29,6 @@ def read_root():
 @app.post("/voice-chat")
 async def voice_chat(file: UploadFile = File(...)):
     try:
-        # 1. EARS (Groq Whisper)
         audio_data = await file.read()
         transcription = client.audio.transcriptions.create(
             file=(file.filename, audio_data),
@@ -38,19 +38,17 @@ async def voice_chat(file: UploadFile = File(...)):
         user_text = transcription
         print(f"User said: {user_text}")
 
-        # 2. BRAIN (Groq's new recommended model)
         completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b", # <--- THE FIX: New model name
+            model="openai/gpt-oss-120b", 
             messages=[
                 {"role": "system", "content": "You are a helpful, friendly voice assistant. Keep your answers short, natural, and conversational. Do not use markdown or emojis, as your reply will be spoken aloud."},
                 {"role": "user", "content": user_text}
             ],
-            max_tokens=1024 # This new model may need a higher token limit
+            max_tokens=1024
         )
         ai_reply = completion.choices[0].message.content
         print(f"AI replied: {ai_reply}")
 
-        # 3. MOUTH (Edge TTS)
         communicate = edge_tts.Communicate(ai_reply, "en-IN-NeerjaNeural")
         audio_stream = io.BytesIO()
         async with communicate.stream() as stream:
@@ -68,3 +66,9 @@ async def voice_chat(file: UploadFile = File(...)):
     except Exception as e:
         print(f"CRITICAL ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    # Read the port from the environment variable, defaulting to 7860 if not set.
+    port = int(os.environ.get("PORT", 7860))
+    # Run the server on 0.0.0.0 to be accessible from outside the container.
+    uvicorn.run(app, host="0.0.0.0", port=port)
