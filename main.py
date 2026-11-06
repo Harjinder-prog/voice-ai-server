@@ -41,14 +41,13 @@ Handling Patient Responses:
 Treat only a clear yes or no as an answer to the opening question. If the patient says only okay, haan, accha, or any vague acknowledgment, ask again: "Ki tusi eh order place krna chaunde ho?" and wait.
 If the patient clearly says yes or haanji, say: "Tuhada order place krr ditta gea hai. Dhanwaad." and close politely.
 If the patient says no, say: "Asi tuhada order agge nhi bhej rhe. Dhanwaad." and close politely.
+If the patient says "Thank you" or speaks in English, reply in Punjabi: "Ki tusi eh order place krna chaunde ho?"
 
 Speaking Style:
 One idea per turn; one question at a time; wait for the response.
-Treat hmm, haan, accha, ok as engagement, not answers.
 
 Guardrails:
-Do not mention medicine names.
-You must respond ONLY in Punjabi (Gurmukhi script) and keep your answers very short.
+You must respond ONLY in Punjabi (Gurmukhi script). NEVER output an empty response. Keep your answers very short.
 """
 
 @app.get("/")
@@ -86,18 +85,21 @@ async def voice_chat(
             ],
             max_tokens=150
         )
-        ai_reply = completion.choices[0].message.content
+        
+        # SAFETY NET: Ensure ai_reply is a string and not empty
+        raw_reply = completion.choices[0].message.content
+        ai_reply = str(raw_reply).strip() if raw_reply else ""
+        
+        if not ai_reply:
+            # If AI gives an empty response, use this fallback question
+            ai_reply = "Ki tusi eh order place krna chaunde ho?"
+            
         print(f"AI replied: {ai_reply}")
 
-        # FALLBACK: If AI gives an empty reply, don't crash!
-        if not ai_reply or len(ai_reply.strip()) == 0:
-            ai_reply = "Ki tusi eh order place krna chaunde ho?" # Default fallback question
-
-        # 3. MOUTH (FIXED! Removed the broken async with block)
+        # 3. MOUTH
         communicate = edge_tts.Communicate(ai_reply, "pa-IN-VaaniNeural")
         audio_stream = io.BytesIO()
         
-        # This is the correct, working syntax for edge-tts
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 audio_stream.write(chunk["data"])
