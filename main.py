@@ -49,12 +49,11 @@ async def voice_chat(file: UploadFile = File(...)):
         ai_reply = completion.choices[0].message.content
         print(f"AI replied: {ai_reply}")
 
-        communicate = edge_tts.Communicate(ai_reply, "en-IN-NeerjaNeural")
+                communicate = edge_tts.Communicate(ai_reply, "en-IN-NeerjaNeural")
         audio_stream = io.BytesIO()
-        async with communicate.stream() as stream:
-            async for chunk in stream:
-                if chunk["type"] == "audio":
-                    audio_stream.write(chunk["data"])
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_stream.write(chunk["data"])
         
         audio_stream.seek(0)
         
