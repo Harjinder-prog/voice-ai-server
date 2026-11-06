@@ -20,7 +20,6 @@ app.add_middleware(
 groq_key = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=groq_key)
 
-# --- YOUR SARVAM SCRIPT INJECTED HERE ---
 SYSTEM_PROMPT = """You are a warm, gentle, professional female assistant calling on behalf of Nihal Hospital.
 Channel: voice telephony, outbound. You call patients who placed a home-delivery order for medicines from Nihal Hospital.
 Keep the call short, ideally 20 to 40 seconds.
@@ -36,27 +35,19 @@ Do not repeat the greeting or the opening sentence after it plays. Stay quiet an
 
 Never skip the question "Ki tusi eh order place krna chaunde ho?". If the patient says only okay, haan, accha, or a vague acknowledgment, ask it again in one short sentence and wait. Do not reply until the patient has clearly answered.
 
-After the patient has clearly answered, close politely with: "Nihal Hospital vallo tuhaada dhannvaad ji. Tuhaada din shubh rahe." and then say "END_CALL".
+After the patient has clearly answered, close politely with: "Nihal Hospital vallo tuhaada dhannvaad ji. Tuhaada din shubh rahe."
 
 Handling Patient Responses:
 Treat only a clear yes or no as an answer to the opening question. If the patient says only okay, haan, accha, or any vague acknowledgment, ask again: "Ki tusi eh order place krna chaunde ho?" and wait.
 If the patient clearly says yes or haanji, say: "Tuhada order place krr ditta gea hai. Dhanwaad." and close politely.
-If the patient asks when the medicines will arrive, do not promise a time; say hospital staff will share the delivery details.
-If the patient says no, did not place the order, no longer needs the medicines, or does not want to place the order, say: "Asi tuhada order agge nhi bhej rhe. Dhanwaad." and close politely.
-If the patient requests to speak to hospital staff, record a callback request, tell them staff will reach out, and end the call.
+If the patient says no, say: "Asi tuhada order agge nhi bhej rhe. Dhanwaad." and close politely.
 
 Speaking Style:
 One idea per turn; one question at a time; wait for the response.
-Vary phrasing when repeating; do not repeat verbatim.
 Treat hmm, haan, accha, ok as engagement, not answers.
-If unclear, paraphrase what was heard and confirm.
 
 Guardrails:
-Do not mention medicine names, diagnoses, or any order details, and never invent order details.
-Do not provide medical advice.
-Do not promise an exact delivery time.
-If the patient is hostile or abusive, stay calm, thank them politely, and say "END_CALL".
-
+Do not mention medicine names.
 You must respond ONLY in Punjabi (Gurmukhi script) and keep your answers very short.
 """
 
@@ -71,7 +62,7 @@ def health_check():
 @app.post("/voice-chat")
 async def voice_chat(
     file: UploadFile = File(...), 
-    patient_name: str = Form("Patient") # We now accept the name from the app!
+    patient_name: str = Form("Patient")
 ):
     try:
         # 1. EARS
@@ -84,8 +75,7 @@ async def voice_chat(
         user_text = transcription
         print(f"Patient said: {user_text}")
 
-        # 2. BRAIN (Using your exact script)
-        # We inject the patient's name into the prompt
+        # 2. BRAIN
         final_prompt = SYSTEM_PROMPT.replace("{patient_name}", patient_name)
         
         completion = client.chat.completions.create(
@@ -94,18 +84,23 @@ async def voice_chat(
                 {"role": "system", "content": final_prompt},
                 {"role": "user", "content": user_text}
             ],
-            max_tokens=150 # Keep replies very short
+            max_tokens=150
         )
         ai_reply = completion.choices[0].message.content
         print(f"AI replied: {ai_reply}")
 
-        # 3. MOUTH
+        # FALLBACK: If AI gives an empty reply, don't crash!
+        if not ai_reply or len(ai_reply.strip()) == 0:
+            ai_reply = "Ki tusi eh order place krna chaunde ho?" # Default fallback question
+
+        # 3. MOUTH (FIXED! Removed the broken async with block)
         communicate = edge_tts.Communicate(ai_reply, "pa-IN-VaaniNeural")
         audio_stream = io.BytesIO()
-        async with communicate.stream() as stream:
-            async for chunk in stream:
-                if chunk["type"] == "audio":
-                    audio_stream.write(chunk["data"])
+        
+        # This is the correct, working syntax for edge-tts
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_stream.write(chunk["data"])
         
         audio_stream.seek(0)
         
