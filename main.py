@@ -8,6 +8,7 @@ import edge_tts
 
 app = FastAPI()
 
+# Allow your browser to talk to this server
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,11 +17,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Check if key exists on startup
-api_key = os.environ.get("GROQ_API_KEY")
-if not api_key:
-    print("WARNING: GROQ_API_KEY is not set!")
-client = Groq(api_key=api_key)
+# Setup Groq for Ears (Whisper) and Brain (Llama)
+groq_key = os.environ.get("GROQ_API_KEY")
+if not groq_key:
+    print("WARNING: GROQ_API_KEY is missing!")
+client = Groq(api_key=groq_key)
 
 @app.get("/")
 def read_root():
@@ -29,7 +30,7 @@ def read_root():
 @app.post("/voice-chat")
 async def voice_chat(file: UploadFile = File(...)):
     try:
-        # 1. EARS
+        # 1. EARS (Groq Whisper)
         audio_data = await file.read()
         transcription = client.audio.transcriptions.create(
             file=(file.filename, audio_data),
@@ -39,34 +40,32 @@ async def voice_chat(file: UploadFile = File(...)):
         user_text = transcription
         print(f"User said: {user_text}")
 
-        # 2. BRAIN
+        # 2. BRAIN (Groq Llama 3.3)
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile", # Updated to the latest working model
             messages=[
-                {"role": "system", "content": "You are a helpful, friendly voice assistant. Keep your answers short and conversational."},
+                {"role": "system", "content": "You are a helpful, friendly voice assistant. Keep your answers short, natural, and conversational. Do not use markdown or emojis, as your reply will be spoken aloud."},
                 {"role": "user", "content": user_text}
             ]
         )
         ai_reply = completion.choices[0].message.content
         print(f"AI replied: {ai_reply}")
 
-        # 3. MOUTH
+        # 3. MOUTH (Edge TTS)
         communicate = edge_tts.Communicate(ai_reply, "en-IN-NeerjaNeural")
         audio_stream = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_stream.write(chunk["data"])
+        async with communicate.stream() as stream:
+            async for chunk in stream:
+                if chunk["type"] == "audio":
+                    audio_stream.write(chunk["data"])
         
         audio_stream.seek(0)
         
-        # Check if audio was actually generated
         if audio_stream.getbuffer().nbytes == 0:
             raise Exception("TTS generated empty audio")
 
         return StreamingResponse(audio_stream, media_type="audio/mpeg")
 
     except Exception as e:
-        # Print the EXACT error to the SnapDeploy logs
         print(f"CRITICAL ERROR: {str(e)}")
-        # Tell the frontend there was an error (500), instead of sending fake audio
         raise HTTPException(status_code=500, detail=str(e))
