@@ -8,7 +8,6 @@ import edge_tts
 
 app = FastAPI()
 
-# Allow your browser to talk to this server
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,7 +16,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Setup Groq
 groq_key = os.environ.get("GROQ_API_KEY")
 if not groq_key:
     print("WARNING: GROQ_API_KEY is missing!")
@@ -40,13 +38,14 @@ async def voice_chat(file: UploadFile = File(...)):
         user_text = transcription
         print(f"User said: {user_text}")
 
-        # 2. BRAIN (Groq Llama 3.3)
+        # 2. BRAIN (Groq's new recommended model)
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile", # <--- FIXED MODEL NAME HERE
+            model="openai/gpt-oss-120b", # <--- THE FIX: New model name
             messages=[
                 {"role": "system", "content": "You are a helpful, friendly voice assistant. Keep your answers short, natural, and conversational. Do not use markdown or emojis, as your reply will be spoken aloud."},
                 {"role": "user", "content": user_text}
-            ]
+            ],
+            max_tokens=1024 # This new model may need a higher token limit
         )
         ai_reply = completion.choices[0].message.content
         print(f"AI replied: {ai_reply}")
