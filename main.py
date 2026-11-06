@@ -64,6 +64,10 @@ You must respond ONLY in Punjabi (Gurmukhi script) and keep your answers very sh
 def read_root():
     return {"status": "Hospital Voice Agent is Running!"}
 
+@app.get("/health")
+def health_check():
+    return {"status": "healthy"}
+
 @app.post("/voice-chat")
 async def voice_chat(
     file: UploadFile = File(...), 
