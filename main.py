@@ -1,6 +1,6 @@
 import os
 import io
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from groq import Groq
@@ -8,7 +8,6 @@ import edge_tts
 
 app = FastAPI()
 
-# Allow any browser to talk to this server
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,7 +16,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+# Check if key exists on startup
+api_key = os.environ.get("GROQ_API_KEY")
+if not api_key:
+    print("WARNING: GROQ_API_KEY is not set!")
+client = Groq(api_key=api_key)
 
 @app.get("/")
 def read_root():
@@ -55,8 +58,15 @@ async def voice_chat(file: UploadFile = File(...)):
                 audio_stream.write(chunk["data"])
         
         audio_stream.seek(0)
+        
+        # Check if audio was actually generated
+        if audio_stream.getbuffer().nbytes == 0:
+            raise Exception("TTS generated empty audio")
+
         return StreamingResponse(audio_stream, media_type="audio/mpeg")
 
     except Exception as e:
-        print(f"ERROR: {str(e)}")
-        return {"error": str(e)}
+        # Print the EXACT error to the SnapDeploy logs
+        print(f"CRITICAL ERROR: {str(e)}")
+        # Tell the frontend there was an error (500), instead of sending fake audio
+        raise HTTPException(status_code=500, detail=str(e))
