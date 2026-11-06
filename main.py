@@ -17,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Setup Groq for Ears (Whisper) and Brain (Llama)
+# Setup Groq
 groq_key = os.environ.get("GROQ_API_KEY")
 if not groq_key:
     print("WARNING: GROQ_API_KEY is missing!")
@@ -42,7 +42,7 @@ async def voice_chat(file: UploadFile = File(...)):
 
         # 2. BRAIN (Groq Llama 3.3)
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile", # Updated to the latest working model
+            model="llama-3.3-70b-versatile", # <--- FIXED MODEL NAME HERE
             messages=[
                 {"role": "system", "content": "You are a helpful, friendly voice assistant. Keep your answers short, natural, and conversational. Do not use markdown or emojis, as your reply will be spoken aloud."},
                 {"role": "user", "content": user_text}
