@@ -22,12 +22,11 @@ AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 
 client = Groq(api_key=groq_key)
 
-# 1. Changed "Sat Sri Akal" to "Sa Sri Akal" spelling
-# 2. Changed "Order" to English so it pronounces it correctly
+# Updated to "ਅਪਣਾ" instead of "ਤੁਹਾਡਾ"
 SYSTEM_PROMPT = """You are a professional female assistant calling on behalf of Nihal Hospital.
 Keep the call very short. 
-If they say yes (haan, haanji, theek hai), reply EXACTLY with this sentence and NOTHING else: "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
-If they say no, reply EXACTLY with this sentence and NOTHING else: "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+If they say yes (haan, haanji, theek hai), reply EXACTLY with this sentence and NOTHING else: "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
+If they say no, reply EXACTLY with this sentence and NOTHING else: "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
 If they are unclear, ask EXACTLY: "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 You must respond ONLY in Punjabi (Gurmukhi script) mixed with the English word Order."""
 
@@ -50,7 +49,6 @@ async def answer(request: Request):
 def generate_azure_audio(text):
     speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_REGION)
     speech_config.speech_synthesis_voice_name = "pa-IN-VaaniNeural"
-    
     speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3)
     synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
     
@@ -98,8 +96,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    
-                    # REDUCED TAIL TO 0.3s SO IT HEARS "HANJI" QUICKLY
                     duration = len(ulaw_greeting) / 8000.0
                     ignore_audio_until = time.time() + duration + 0.3
                     
@@ -119,8 +115,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # REDUCED BUFFER SIZE TO 8000 (1 SECOND) TO CATCH SHORT WORDS FASTER
-                if len(audio_buffer) > 8000: 
+                # REDUCED TO 4800 (0.6 seconds) TO CATCH "HANJI" FASTER
+                if len(audio_buffer) > 4800: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     pcm = audioop.ulaw2lin(audio_chunk, 2)
@@ -133,9 +129,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     wav_io.seek(0)
                     
                     try:
+                        # ADDED language="pa" TO FORCE PUNJABI
                         transcription = client.audio.transcriptions.create(
                             file=("audio.wav", wav_io.read()),
                             model="whisper-large-v3",
+                            language="pa", 
                             response_format="text"
                         )
                         user_text = transcription.strip()
@@ -165,7 +163,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
-                            
                             duration = len(ulaw_reply) / 8000.0
                             ignore_audio_until = time.time() + duration + 0.3
                             
