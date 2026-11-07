@@ -30,6 +30,7 @@ def health():
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
+    # 🚨 CHECK THIS: Make sure this matches your current Cloudflare link!
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
@@ -89,7 +90,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
                     duration = len(ulaw_greeting) / 8000.0
-                    # Mute for ONLY 0.3 seconds after greeting. This prevents echo but doesn't mute the user!
+                    
+                    # Mute for exactly the duration of the greeting + 0.3s to catch echo
                     ignore_audio_until = time.time() + duration + 0.3
                     
                     await websocket.send_json({
@@ -108,11 +110,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # 1.0 second buffer. Short enough to be fast, long enough to catch "Haanji"
+                # 1.0 second buffer. This is the sweet spot to catch "Haanji"
                 if len(audio_buffer) > 8000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     
+                    # Upsample to 16kHz for Whisper accuracy
                     pcm_8k = audioop.ulaw2lin(audio_chunk, 2)
                     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                     
@@ -138,14 +141,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(user_text) < 2 or "thank you" in user_text.lower() or "subtitles" in user_text.lower():
                             continue
                             
-                        # USE THE LLM TO CLASSIFY YES/NO
+                        # USE THE NEW LLM MODEL TO CLASSIFY YES/NO
                         classify_prompt = f"""You are a classifier. The user was asked 'Do you want to place the order?' in Punjabi. The user replied: '{user_text}'. 
                         If the user means YES (haan, haanji, theek hai, ok, yes), reply exactly 'YES'. 
                         If the user means NO, reply exactly 'NO'. 
                         If they are asking a question or it is unclear, reply exactly 'UNCLEAR'."""
                         
                         classification = client.chat.completions.create(
-                            model="llama3-8b-8192", 
+                            model="openai/gpt-oss-20b", # UPDATED MODEL HERE
                             messages=[{"role": "user", "content": classify_prompt}],
                             max_tokens=10,
                             temperature=0.0
@@ -167,6 +170,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
                             duration = len(ulaw_reply) / 8000.0
+                            
+                            # Mute while reply plays + 0.3s
                             ignore_audio_until = time.time() + duration + 0.3
                             
                             await websocket.send_json({
