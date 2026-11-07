@@ -10,14 +10,16 @@ import tempfile
 import asyncio
 import time
 import webrtcvad
-import requests
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
+from groq import Groq
 import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
+groq_key = os.environ.get("GROQ_API_KEY")
+client = Groq(api_key=groq_key)
 
 vad = webrtcvad.Vad(1) 
 
@@ -57,23 +59,6 @@ async def text_to_mulaw(text):
     os.remove(out_path)
     return ulaw_data
 
-# NEW: AZURE SPEECH TO TEXT (Telephony Grade)
-def transcribe_azure(audio_bytes):
-    url = f"https://{AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=pa-IN"
-    headers = {
-        "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
-        "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000"
-    }
-    try:
-        response = requests.post(url, headers=headers, data=audio_bytes)
-        result = response.json()
-        if result.get("RecognitionStatus") == "Success":
-            return result.get("DisplayText", "")
-        return ""
-    except Exception as e:
-        print(f"STT Error: {e}")
-        return ""
-
 @app.on_event("startup")
 async def startup_event():
     print(">>> PRE-GENERATING AUDIO CACHE... <<<")
@@ -110,7 +95,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 ulaw_greeting = AUDIO_CACHE["greeting"]
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.5
+                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.2
                     await websocket.send_json({
                         "event": "playAudio",
                         "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_audio}
@@ -140,7 +125,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            if silent_frames_count > 6:
+                            # 3 frames (0.09s) silence triggers instantly
+                            if silent_frames_count > 3:
                                 if len(voiced_frames) < 800: 
                                     voiced_frames.clear()
                                     silent_frames_count = 0
@@ -157,24 +143,37 @@ async def websocket_endpoint(websocket: WebSocket):
                                 silent_frames_count = 0
                                 
                                 try:
-                                    # USE AZURE STT INSTEAD OF WHISPER
-                                    user_text = await asyncio.to_thread(transcribe_azure, wav_io.read())
+                                    # BACK TO GROQ TURBO (Fast!)
+                                    transcription = client.audio.transcriptions.create(
+                                        file=("audio.wav", wav_io.read()), 
+                                        model="whisper-large-v3-turbo", 
+                                        language="pa", 
+                                        response_format="text"
+                                    )
+                                    
+                                    user_text = transcription.strip()
                                     user_text_lower = user_text.lower()
                                     
-                                    if len(user_text) < 1:
+                                    # BLOCK HALLUCINATIONS
+                                    if len(user_text) > 15 or len(user_text) < 2:
                                         continue
                                         
-                                    print(f"--- PATIENT SAID (Azure STT): '{user_text}' ---")
+                                    print(f"--- PATIENT SAID: '{user_text}' ---")
                                     
                                     hang_up = False
                                     audio_to_play = None
                                     
-                                    # Azure usually gets the exact Gurmukhi text
-                                    if any(word in user_text_lower for word in ["ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਹਾਂ ਜੀ", "ਹਾਜੀ"]):
+                                    # MASSIVE MATCH LIST
+                                    yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar", "kardo", 
+                                                 "gy", "ng", "hanji", "haanji", "han gy", "han ji", "haan ji", "haan gy",
+                                                 "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਘਾਂਜੀ", "ਘਾਂ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ"]
+                                    no_words = ["nahi", "no", "nhi", "nhii", "glti", "galti", "cancel", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
+                                    
+                                    if any(word in user_text_lower for word in yes_words):
                                         print("--- MATCHED YES! ---")
                                         audio_to_play = AUDIO_CACHE["yes"]
                                         hang_up = True
-                                    elif any(word in user_text_lower for word in ["ਨਹੀਂ", "ਨਾ", "no", "nahi"]):
+                                    elif any(word in user_text_lower for word in no_words):
                                         print("--- MATCHED NO! ---")
                                         audio_to_play = AUDIO_CACHE["no"]
                                         hang_up = True
@@ -185,7 +184,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     if audio_to_play:
                                         base64_reply = base64.b64encode(audio_to_play).decode('utf-8')
                                         duration = len(audio_to_play) / 8000.0
-                                        ignore_audio_until = time.time() + duration + 0.5
+                                        ignore_audio_until = time.time() + duration + 0.2
                                         
                                         await websocket.send_json({
                                             "event": "playAudio",
@@ -194,7 +193,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                         
                                         if hang_up:
                                             print("--- HANGING UP CALL ---")
-                                            await asyncio.sleep(duration + 0.5)
+                                            await asyncio.sleep(duration + 0.2)
                                             await websocket.close()
                                             return
                                 except Exception as e: 
