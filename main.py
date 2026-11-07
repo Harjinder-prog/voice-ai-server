@@ -11,7 +11,7 @@ import asyncio
 import time
 import webrtcvad
 import requests
-from fastapi import FastAPI, WebSocket, Request, BackgroundTasks
+from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import azure.cognitiveservices.speech as speechsdk
@@ -20,7 +20,6 @@ app = FastAPI()
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 
-# Vobiz Credentials
 VOBIZ_AUTH_ID = "MA_9CZ9ATEL"
 VOBIZ_AUTH_TOKEN = "1qsXeC2Qi9wn1ozgYcm2jXGC92gkk23TccPqWwVolsn6g9XJCr32xC9353w85gWy"
 VOBIZ_FROM_NUMBER = "+918064270297"
@@ -28,7 +27,7 @@ NGROK_URL = "https://eldercare-flatterer-skier.ngrok-free.dev"
 
 vad = webrtcvad.Vad(1) 
 
-# We will store call details in memory while the call is active
+# Store call details using the Order ID as the key
 ACTIVE_CALLS = {}
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
@@ -41,7 +40,7 @@ AUDIO_CACHE = {}
 class CallRequest(BaseModel):
     phone_number: str
     order_id: str
-    callback_url: str # The URL of your Cline app to notify
+    callback_url: str
 
 @app.get("/health")
 def health():
@@ -94,24 +93,21 @@ async def startup_event():
     AUDIO_CACHE["unclear"] = await text_to_mulaw(UNCLEAR_TEXT)
     print(">>> CACHE READY! <<<")
 
-# NEW ENDPOINT: Your Cline app will call this to trigger the call
 @app.post("/trigger-call")
 async def trigger_call(req: CallRequest):
     print(f"--- NEW CALL REQUEST FOR ORDER {req.order_id} ---")
     
-    # Store the details so the AI knows which order it is talking about
-    ACTIVE_CALLS[req.phone_number] = {
-        "order_id": req.order_id,
+    # Store details using the order_id as the key
+    ACTIVE_CALLS[req.order_id] = {
         "callback_url": req.callback_url
     }
     
-    # Trigger the Vobiz Call
     url = f"https://api.vobiz.ai/api/v1/Account/{VOBIZ_AUTH_ID}/Call/"
     headers = {"X-Auth-ID": VOBIZ_AUTH_ID, "X-Auth-Token": VOBIZ_AUTH_TOKEN, "Content-Type": "application/json"}
     payload = {
         "from": VOBIZ_FROM_NUMBER, 
         "to": req.phone_number, 
-        "answer_url": f"{NGROK_URL}/answer", 
+        "answer_url": f"{NGROK_URL}/answer?order_id={req.order_id}", # Pass order_id to /answer
         "answer_method": "POST"
     }
     
@@ -120,10 +116,14 @@ async def trigger_call(req: CallRequest):
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
-    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    # Get the order_id from the URL params
+    order_id = request.query_params.get("order_id", "UNKNOWN")
+    
+    # Send the order_id into the WebSocket URL
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
-            wss://eldercare-flatterer-skier.ngrok-free.dev/ws
+            wss://eldercare-flatterer-skier.ngrok-free.dev/ws?order_id={order_id}
         </Stream>
     </Response>"""
     return PlainTextResponse(content=xml, media_type="application/xml")
@@ -131,14 +131,15 @@ async def answer(request: Request):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    
+    # Get the order_id from the WebSocket URL
+    order_id = websocket.query_params.get("order_id", "UNKNOWN")
+    print(f">>> WEBSOCKET CONNECTED FOR ORDER {order_id} <<<")
+    
     audio_buffer = bytearray()
     ignore_audio_until = time.time() + 2.0 
     voiced_frames = bytearray()
     silent_frames_count = 0
-    
-    # We need to figure out which patient is calling. 
-    # Vobiz sends the caller's number in the 'start' event.
-    patient_number = None 
     
     try:
         while True:
@@ -146,10 +147,6 @@ async def websocket_endpoint(websocket: WebSocket):
             data = json.loads(message)
             
             if data['event'] == 'start':
-                # Extract the patient's phone number from the Vobiz payload
-                patient_number = data['start']['callId'] # Simplification for now
-                # Note: In a real setup, you parse the 'from' number from the Vobiz stream metadata
-                
                 ulaw_greeting = AUDIO_CACHE["greeting"]
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
@@ -235,17 +232,14 @@ async def websocket_endpoint(websocket: WebSocket):
                                             print("--- HANGING UP CALL ---")
                                             
                                             # SEND WEBHOOK TO YOUR APP!
-                                            if patient_number in ACTIVE_CALLS:
-                                                call_data = ACTIVE_CALLS[patient_number]
-                                                callback_url = call_data["callback_url"]
-                                                order_id = call_data["order_id"]
+                                            if order_id in ACTIVE_CALLS:
+                                                callback_url = ACTIVE_CALLS[order_id]["callback_url"]
                                                 
-                                                # Send the result back to your Cline App
                                                 try:
                                                     requests.post(callback_url, json={"order_id": order_id, "status": call_status})
-                                                    print(f"Webhook sent to app: Order {order_id} {call_status}")
+                                                    print(f"--- WEBHOOK SENT TO APP: Order {order_id} {call_status} ---")
                                                 except Exception as e:
-                                                    print(f"Webhook failed: {e}")
+                                                    print(f"!!! WEBHOOK FAILED: {e} !!!")
                                                 
                                             await asyncio.sleep(duration + 0.2)
                                             await websocket.close()
