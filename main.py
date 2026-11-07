@@ -22,14 +22,6 @@ AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 
 client = Groq(api_key=groq_key)
 
-# Updated to "ਅਪਣਾ" instead of "ਤੁਹਾਡਾ"
-SYSTEM_PROMPT = """You are a professional female assistant calling on behalf of Nihal Hospital.
-Keep the call very short. 
-If they say yes (haan, haanji, theek hai), reply EXACTLY with this sentence and NOTHING else: "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
-If they say no, reply EXACTLY with this sentence and NOTHING else: "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
-If they are unclear, ask EXACTLY: "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
-You must respond ONLY in Punjabi (Gurmukhi script) mixed with the English word Order."""
-
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 @app.get("/health")
@@ -97,7 +89,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
                     duration = len(ulaw_greeting) / 8000.0
-                    ignore_audio_until = time.time() + duration + 0.3
+                    # Ignore echo exactly while greeting plays + 0.5s tail
+                    ignore_audio_until = time.time() + duration + 0.5
                     
                     await websocket.send_json({
                         "event": "playAudio",
@@ -115,8 +108,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # REDUCED TO 4800 (0.6 seconds) TO CATCH "HANJI" FASTER
-                if len(audio_buffer) > 4800: 
+                # Reduced to 2400 bytes (0.3 seconds) to catch "Haanji" instantly
+                if len(audio_buffer) > 2400: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     pcm = audioop.ulaw2lin(audio_chunk, 2)
@@ -129,7 +122,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     wav_io.seek(0)
                     
                     try:
-                        # ADDED language="pa" TO FORCE PUNJABI
                         transcription = client.audio.transcriptions.create(
                             file=("audio.wav", wav_io.read()),
                             model="whisper-large-v3",
@@ -137,25 +129,21 @@ async def websocket_endpoint(websocket: WebSocket):
                             response_format="text"
                         )
                         user_text = transcription.strip()
+                        print(f"Patient said: {user_text}")
                         
+                        # Ignore tiny hallucinations
                         if len(user_text) < 2 or "thank you" in user_text.lower() or "subtitles" in user_text.lower():
                             continue
                             
-                        print(f"Patient said: {user_text}")
-                        
-                        completion = client.chat.completions.create(
-                            model="llama3-8b-8192", 
-                            messages=[
-                                {"role": "system", "content": SYSTEM_PROMPT},
-                                {"role": "user", "content": user_text}
-                            ],
-                            max_tokens=50,
-                            temperature=0.1
-                        )
-                        
-                        ai_reply = completion.choices[0].message.content.strip()
-                        if not ai_reply:
+                        # --- BYPASSING LLM FOR EXACT TEXT ---
+                        user_text_lower = user_text.lower()
+                        if any(word in user_text_lower for word in ["haan", "han", "yes", "theek", "ok", "ਹਾਂ"]):
+                            ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
+                        elif any(word in user_text_lower for word in ["nahi", "no", "ਨਹੀਂ", "ਨਾ"]):
+                            ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+                        else:
                             ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                        # ------------------------------------
                             
                         print(f"AI replied: {ai_reply}")
                         
@@ -163,8 +151,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
+                            
                             duration = len(ulaw_reply) / 8000.0
-                            ignore_audio_until = time.time() + duration + 0.3
+                            ignore_audio_until = time.time() + duration + 0.5
                             
                             await websocket.send_json({
                                 "event": "playAudio",
