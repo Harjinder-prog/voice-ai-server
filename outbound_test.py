@@ -15,7 +15,6 @@ from groq import Groq
 import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
-
 groq_key = os.environ.get("GROQ_API_KEY")
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
@@ -29,11 +28,11 @@ def health():
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
-    # NEW CLOUDFLARE LINK
+    # USING NGROK LINK
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
-            wss://barriers-floors-situation-nylon.trycloudflare.com/ws
+            wss://eldercare-flatterer-skier.ngrok-free.dev/ws
         </Stream>
     </Response>"""
     return PlainTextResponse(content=xml, media_type="application/xml")
@@ -80,7 +79,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    # Mute for greeting + 0.2s to prevent echo
                     ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.2
                     await websocket.send_json({
                         "event": "playAudio",
@@ -92,7 +90,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # 0.6 seconds buffer (catches short words very fast)
                 if len(audio_buffer) > 4800: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
@@ -114,7 +111,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         if len(user_text) < 2 or "thank you" in user_text.lower(): continue
                             
-                        # FOOLPROOF STRING MATCHING (No LLM needed)
                         user_text_lower = user_text.lower()
                         yes_words = ["haan", "han", "yes", "theek", "ok", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ"]
                         no_words = ["nahi", "no", "ਨਹੀਂ", "ਨਾ"]
