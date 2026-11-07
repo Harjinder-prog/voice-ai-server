@@ -9,7 +9,8 @@ import subprocess
 import tempfile
 import asyncio
 import time
-import webrtcvad
+import numpy as np
+import onnxruntime as ort
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
 from groq import Groq
@@ -21,8 +22,14 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
-# VAD Level 1 (Highly Sensitive)
-vad = webrtcvad.Vad(1) 
+# Load Silero VAD Model
+print(">>> LOADING SILERO VAD MODEL... <<<")
+# We download the ONNX model directly to memory to avoid file path issues
+import urllib.request
+model_url = "https://github.com/snakers4/silero-vad/raw/master/files/silero_vad.onnx"
+urllib.request.urlretrieve(model_url, "silero_vad.onnx")
+ort_session = ort.InferenceSession("silero_vad.onnx")
+print(">>> SILERO VAD LOADED! <<<")
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 YES_TEXT = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
@@ -96,7 +103,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 ulaw_greeting = AUDIO_CACHE["greeting"]
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    # Reduced echo tail to 0.3s for instant listening
                     ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.3
                     await websocket.send_json({
                         "event": "playAudio",
@@ -113,10 +119,23 @@ async def websocket_endpoint(websocket: WebSocket):
                     del audio_buffer[:240]
                     frame_pcm = audioop.ulaw2lin(frame_mulaw, 2)
                     
+                    # Silero VAD needs float32 audio normalized between -1 and 1
+                    frame_np = np.frombuffer(frame_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                    
                     try:
-                        is_speech = vad.is_speech(frame_pcm, 8000)
-                    except Exception:
-                        is_speech = False
+                        # Silero VAD Inference (expects 16kHz, but we'll feed 8kHz for now as it's robust)
+                        # For perfect accuracy, we should upsample to 16k, but 8k works decently with Silero
+                        ort_inputs = {
+                            ort_session.get_inputs()[0].name: np.expand_dims(frame_np, axis=0),
+                            ort_session.get_inputs()[1].name: np.array([8000], dtype=np.int64),
+                            ort_session.get_inputs()[2].name: np.zeros((2, 1, 128), dtype=np.float32)
+                        }
+                        out, _ = ort_session.run(None, ort_inputs)
+                        is_speech = out[0][0] > 0.5
+                    except Exception as e:
+                        # Fallback if Silero fails on dimensions
+                        volume = audioop.rms(frame_pcm, 2)
+                        is_speech = volume > 500
                     
                     if is_speech:
                         voiced_frames.extend(frame_mulaw)
@@ -125,8 +144,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # REDUCED TO 4 FRAMES (0.12 seconds) FOR INSTANT TRIGGER
-                            if silent_frames_count > 4:
+                            # 0.2 seconds of silence triggers processing
+                            if silent_frames_count > 6:
+                                # Minimum speech length check (ignore tiny noise blips)
+                                if len(voiced_frames) < 800: # less than 0.1s of audio
+                                    voiced_frames.clear()
+                                    silent_frames_count = 0
+                                    continue
+
                                 pcm_8k = audioop.ulaw2lin(voiced_frames, 2)
                                 pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                                 wav_io = io.BytesIO()
@@ -138,40 +163,37 @@ async def websocket_endpoint(websocket: WebSocket):
                                 silent_frames_count = 0
                                 
                                 try:
-                                    # TURBO MODEL FOR MAX SPEED
                                     transcription = client.audio.transcriptions.create(
                                         file=("audio.wav", wav_io.read()), 
                                         model="whisper-large-v3-turbo", 
                                         language="pa", 
                                         response_format="text"
                                     )
-                                    user_text = transcription.strip()
                                     
-                                    if len(user_text) < 1 or any(x in user_text for x in ["ਕੋਲੋ", "ਮੀਡਿ", "ਗੀਤ"]): 
-                                        continue
-                                        
+                                    user_text = transcription.strip()
                                     user_text_lower = user_text.lower()
                                     
-                                    # MASSIVE LIST OF HALLUCINATIONS AND EXACT MATCHES
-                                    yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "kar", "kardo", 
-                                                 "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ", 
-                                                 "ਘਾਂਜੀ", "ਘਾਂ", "ਆਨੀਂਦੀ", "ਬੱੱੁਂਕੀ", "ਦੱ"]
-                                    no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
+                                    # HALLUCINATION FILTER: If the text is longer than 20 chars, it's a hallucination
+                                    if len(user_text) > 20 or len(user_text) < 2:
+                                        print(f"--- IGNORING HALLUCINATION: '{user_text}' ---")
+                                        continue
+                                        
+                                    print(f"--- PATIENT SAID: '{user_text}' ---")
                                     
+                                    # Strict exact matching
                                     hang_up = False
                                     audio_to_play = None
                                     
-                                    # NO LLM! IMMEDIATE PYTHON MATCHING
-                                    if any(word in user_text_lower for word in yes_words):
-                                        print(f"--- MATCHED YES: '{user_text}' ---")
+                                    if any(word in user_text_lower for word in ["ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਹਾਂ ਜੀ"]):
+                                        print("--- MATCHED YES! ---")
                                         audio_to_play = AUDIO_CACHE["yes"]
                                         hang_up = True
-                                    elif any(word in user_text_lower for word in no_words):
-                                        print(f"--- MATCHED NO: '{user_text}' ---")
+                                    elif any(word in user_text_lower for word in ["ਨਹੀਂ", "ਨਾ", "no", "nahi"]):
+                                        print("--- MATCHED NO! ---")
                                         audio_to_play = AUDIO_CACHE["no"]
                                         hang_up = True
                                     else:
-                                        print(f"--- UNCLEAR: '{user_text}' ---")
+                                        print("--- UNCLEAR ---")
                                         audio_to_play = AUDIO_CACHE["unclear"]
                                         
                                     if audio_to_play:
