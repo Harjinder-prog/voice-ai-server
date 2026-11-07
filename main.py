@@ -10,15 +10,26 @@ import tempfile
 import asyncio
 import time
 import webrtcvad
-from fastapi import FastAPI, WebSocket, Request
+import requests
+from fastapi import FastAPI, WebSocket, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 
+# Vobiz Credentials
+VOBIZ_AUTH_ID = "MA_9CZ9ATEL"
+VOBIZ_AUTH_TOKEN = "1qsXeC2Qi9wn1ozgYcm2jXGC92gkk23TccPqWwVolsn6g9XJCr32xC9353w85gWy"
+VOBIZ_FROM_NUMBER = "+918064270297"
+NGROK_URL = "https://eldercare-flatterer-skier.ngrok-free.dev"
+
 vad = webrtcvad.Vad(1) 
+
+# We will store call details in memory while the call is active
+ACTIVE_CALLS = {}
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 YES_TEXT = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
@@ -26,6 +37,11 @@ NO_TEXT = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭ�
 UNCLEAR_TEXT = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 AUDIO_CACHE = {}
+
+class CallRequest(BaseModel):
+    phone_number: str
+    order_id: str
+    callback_url: str # The URL of your Cline app to notify
 
 @app.get("/health")
 def health():
@@ -56,24 +72,15 @@ async def text_to_mulaw(text):
     os.remove(out_path)
     return ulaw_data
 
-# FAST AZURE STT (Using SDK instead of REST API)
 def transcribe_azure_fast(pcm_16k_bytes):
     speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_REGION)
     speech_config.speech_recognition_language = "pa-IN"
-    
-    # Create a push stream and audio config
     stream = speechsdk.audio.PushAudioInputStream()
     audio_config = speechsdk.audio.AudioConfig(stream=stream)
-    
     recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
-    
-    # Push the audio data and close the stream
     stream.write(pcm_16k_bytes)
     stream.close()
-    
-    # Recognize
     result = recognizer.recognize_once()
-    
     if result.reason == speechsdk.ResultReason.RecognizedSpeech:
         return result.text
     return ""
@@ -86,6 +93,30 @@ async def startup_event():
     AUDIO_CACHE["no"] = await text_to_mulaw(NO_TEXT)
     AUDIO_CACHE["unclear"] = await text_to_mulaw(UNCLEAR_TEXT)
     print(">>> CACHE READY! <<<")
+
+# NEW ENDPOINT: Your Cline app will call this to trigger the call
+@app.post("/trigger-call")
+async def trigger_call(req: CallRequest):
+    print(f"--- NEW CALL REQUEST FOR ORDER {req.order_id} ---")
+    
+    # Store the details so the AI knows which order it is talking about
+    ACTIVE_CALLS[req.phone_number] = {
+        "order_id": req.order_id,
+        "callback_url": req.callback_url
+    }
+    
+    # Trigger the Vobiz Call
+    url = f"https://api.vobiz.ai/api/v1/Account/{VOBIZ_AUTH_ID}/Call/"
+    headers = {"X-Auth-ID": VOBIZ_AUTH_ID, "X-Auth-Token": VOBIZ_AUTH_TOKEN, "Content-Type": "application/json"}
+    payload = {
+        "from": VOBIZ_FROM_NUMBER, 
+        "to": req.phone_number, 
+        "answer_url": f"{NGROK_URL}/answer", 
+        "answer_method": "POST"
+    }
+    
+    response = requests.post(url, headers=headers, json=payload)
+    return {"status": "calling", "vobiz_response": response.json()}
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
@@ -105,12 +136,20 @@ async def websocket_endpoint(websocket: WebSocket):
     voiced_frames = bytearray()
     silent_frames_count = 0
     
+    # We need to figure out which patient is calling. 
+    # Vobiz sends the caller's number in the 'start' event.
+    patient_number = None 
+    
     try:
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
             
             if data['event'] == 'start':
+                # Extract the patient's phone number from the Vobiz payload
+                patient_number = data['start']['callId'] # Simplification for now
+                # Note: In a real setup, you parse the 'from' number from the Vobiz stream metadata
+                
                 ulaw_greeting = AUDIO_CACHE["greeting"]
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
@@ -144,7 +183,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # Trigger after 4 frames (0.12s) of silence
                             if silent_frames_count > 4:
                                 if len(voiced_frames) < 800: 
                                     voiced_frames.clear()
@@ -157,7 +195,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                 silent_frames_count = 0
                                 
                                 try:
-                                    # USE THE FAST SDK INSTEAD OF REST API
                                     user_text = await asyncio.to_thread(transcribe_azure_fast, pcm_16k)
                                     user_text_lower = user_text.lower()
                                     
@@ -168,15 +205,18 @@ async def websocket_endpoint(websocket: WebSocket):
                                     
                                     hang_up = False
                                     audio_to_play = None
+                                    call_status = None
                                     
                                     if any(word in user_text_lower for word in ["ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਹਾਂ ਜੀ", "ਹਾਜੀ"]):
                                         print("--- MATCHED YES! ---")
                                         audio_to_play = AUDIO_CACHE["yes"]
                                         hang_up = True
+                                        call_status = "confirmed"
                                     elif any(word in user_text_lower for word in ["ਨਹੀਂ", "ਨਾ", "no", "nahi"]):
                                         print("--- MATCHED NO! ---")
                                         audio_to_play = AUDIO_CACHE["no"]
                                         hang_up = True
+                                        call_status = "cancelled"
                                     else:
                                         print("--- UNCLEAR ---")
                                         audio_to_play = AUDIO_CACHE["unclear"]
@@ -193,6 +233,20 @@ async def websocket_endpoint(websocket: WebSocket):
                                         
                                         if hang_up:
                                             print("--- HANGING UP CALL ---")
+                                            
+                                            # SEND WEBHOOK TO YOUR APP!
+                                            if patient_number in ACTIVE_CALLS:
+                                                call_data = ACTIVE_CALLS[patient_number]
+                                                callback_url = call_data["callback_url"]
+                                                order_id = call_data["order_id"]
+                                                
+                                                # Send the result back to your Cline App
+                                                try:
+                                                    requests.post(callback_url, json={"order_id": order_id, "status": call_status})
+                                                    print(f"Webhook sent to app: Order {order_id} {call_status}")
+                                                except Exception as e:
+                                                    print(f"Webhook failed: {e}")
+                                                
                                             await asyncio.sleep(duration + 0.2)
                                             await websocket.close()
                                             return
