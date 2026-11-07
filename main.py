@@ -21,7 +21,8 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
-vad = webrtcvad.Vad(2) 
+# Lowered VAD to 1 (more sensitive to short words like Haanji)
+vad = webrtcvad.Vad(1) 
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
@@ -85,7 +86,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 1.5
+                    # Reduced echo tail to 0.5s so it listens to you immediately
+                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.5
                     await websocket.send_json({
                         "event": "playAudio",
                         "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_audio}
@@ -98,18 +100,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # Process in 30ms frames (240 bytes)
                 while len(audio_buffer) >= 240:
                     frame_mulaw = bytes(audio_buffer[:240])
                     del audio_buffer[:240]
                     
-                    # FIX: Convert mu-law to PCM 16-bit BEFORE sending to VAD
                     frame_pcm = audioop.ulaw2lin(frame_mulaw, 2)
                     
                     try:
                         is_speech = vad.is_speech(frame_pcm, 8000)
                     except Exception as e:
-                        print(f"VAD Error: {e}")
                         is_speech = False
                     
                     if is_speech:
@@ -119,11 +118,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # If silent for ~0.5s (16 frames), we assume they stopped talking
-                            if silent_frames_count > 16:
+                            # Reduced to 10 frames (0.3s) to trigger instantly when you stop speaking
+                            if silent_frames_count > 10:
                                 print("--- DEBUG: VAD DETECTED END OF SPEECH ---")
                                 
-                                # Convert the collected mu-law frames to 16kHz WAV
                                 pcm_8k = audioop.ulaw2lin(voiced_frames, 2)
                                 pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                                 wav_io = io.BytesIO()
@@ -173,7 +171,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     if ulaw_reply:
                                         base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
                                         duration = len(ulaw_reply) / 8000.0
-                                        ignore_audio_until = time.time() + duration + 1.0
+                                        ignore_audio_until = time.time() + duration + 0.5
                                         
                                         await websocket.send_json({
                                             "event": "playAudio",
