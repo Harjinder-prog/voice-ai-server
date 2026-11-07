@@ -21,24 +21,19 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
-# Lowered VAD to 1 (more sensitive to short words like Haanji)
 vad = webrtcvad.Vad(1) 
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+YES_TEXT = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
+NO_TEXT = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+UNCLEAR_TEXT = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+
+# AUDIO CACHE (For instant response)
+AUDIO_CACHE = {}
 
 @app.get("/health")
 def health():
     return {"status": "healthy"}
-
-@app.api_route("/answer", methods=["GET", "POST"])
-async def answer(request: Request):
-    xml = """<?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-        <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
-            wss://eldercare-flatterer-skier.ngrok-free.dev/ws
-        </Stream>
-    </Response>"""
-    return PlainTextResponse(content=xml, media_type="application/xml")
 
 def generate_azure_audio(text):
     speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_REGION)
@@ -65,6 +60,26 @@ async def text_to_mulaw(text):
     os.remove(out_path)
     return ulaw_data
 
+# PRE-GENERATE AUDIO ON STARTUP
+@app.on_event("startup")
+async def startup_event():
+    print(">>> PRE-GENERATING AUDIO CACHE (Takes 5 seconds)... <<<")
+    AUDIO_CACHE["greeting"] = await text_to_mulaw(GREETING_TEXT)
+    AUDIO_CACHE["yes"] = await text_to_mulaw(YES_TEXT)
+    AUDIO_CACHE["no"] = await text_to_mulaw(NO_TEXT)
+    AUDIO_CACHE["unclear"] = await text_to_mulaw(UNCLEAR_TEXT)
+    print(">>> AUDIO CACHE READY! SYSTEM IS NOW ULTRA-FAST. <<<")
+
+@app.api_route("/answer", methods=["GET", "POST"])
+async def answer(request: Request):
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+        <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
+            wss://eldercare-flatterer-skier.ngrok-free.dev/ws
+        </Stream>
+    </Response>"""
+    return PlainTextResponse(content=xml, media_type="application/xml")
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -82,11 +97,10 @@ async def websocket_endpoint(websocket: WebSocket):
             data = json.loads(message)
             
             if data['event'] == 'start':
-                print(">>> CALL STARTED. SENDING GREETING... <<<")
-                ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
+                print(">>> CALL STARTED. SENDING CACHED GREETING... <<<")
+                ulaw_greeting = AUDIO_CACHE["greeting"]
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    # Reduced echo tail to 0.5s so it listens to you immediately
                     ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.5
                     await websocket.send_json({
                         "event": "playAudio",
@@ -108,7 +122,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     try:
                         is_speech = vad.is_speech(frame_pcm, 8000)
-                    except Exception as e:
+                    except Exception:
                         is_speech = False
                     
                     if is_speech:
@@ -118,8 +132,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # Reduced to 10 frames (0.3s) to trigger instantly when you stop speaking
-                            if silent_frames_count > 10:
+                            # Reduced to 6 frames (0.18s) for instant trigger
+                            if silent_frames_count > 6:
                                 print("--- DEBUG: VAD DETECTED END OF SPEECH ---")
                                 
                                 pcm_8k = audioop.ulaw2lin(voiced_frames, 2)
@@ -155,22 +169,23 @@ async def websocket_endpoint(websocket: WebSocket):
                                     no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
                                     
                                     hang_up = False
+                                    audio_to_play = None
                                     
                                     if any(word in user_text_lower for word in yes_words):
-                                        ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
+                                        print("--- DEBUG: MATCHED YES! ---")
+                                        audio_to_play = AUDIO_CACHE["yes"]
                                         hang_up = True
                                     elif any(word in user_text_lower for word in no_words):
-                                        ai_reply = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+                                        print("--- DEBUG: MATCHED NO! ---")
+                                        audio_to_play = AUDIO_CACHE["no"]
                                         hang_up = True
                                     else:
-                                        ai_reply = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                                        print("--- DEBUG: UNCLEAR. ASKING AGAIN. ---")
+                                        audio_to_play = AUDIO_CACHE["unclear"]
                                         
-                                    print(f"--- DEBUG: AI REPLYING WITH: '{ai_reply}' ---")
-                                    ulaw_reply = await text_to_mulaw(ai_reply)
-                                    
-                                    if ulaw_reply:
-                                        base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
-                                        duration = len(ulaw_reply) / 8000.0
+                                    if audio_to_play:
+                                        base64_reply = base64.b64encode(audio_to_play).decode('utf-8')
+                                        duration = len(audio_to_play) / 8000.0
                                         ignore_audio_until = time.time() + duration + 0.5
                                         
                                         await websocket.send_json({
