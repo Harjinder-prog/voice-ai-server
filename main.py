@@ -12,14 +12,11 @@ import time
 import webrtcvad
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
-from groq import Groq
 import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
-groq_key = os.environ.get("GROQ_API_KEY")
-client = Groq(api_key=groq_key)
 
 vad = webrtcvad.Vad(1) 
 
@@ -58,6 +55,28 @@ async def text_to_mulaw(text):
     os.remove(in_path)
     os.remove(out_path)
     return ulaw_data
+
+# FAST AZURE STT (Using SDK instead of REST API)
+def transcribe_azure_fast(pcm_16k_bytes):
+    speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_REGION)
+    speech_config.speech_recognition_language = "pa-IN"
+    
+    # Create a push stream and audio config
+    stream = speechsdk.audio.PushAudioInputStream()
+    audio_config = speechsdk.audio.AudioConfig(stream=stream)
+    
+    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+    
+    # Push the audio data and close the stream
+    stream.write(pcm_16k_bytes)
+    stream.close()
+    
+    # Recognize
+    result = recognizer.recognize_once()
+    
+    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+        return result.text
+    return ""
 
 @app.on_event("startup")
 async def startup_event():
@@ -125,8 +144,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # 3 frames (0.09s) silence triggers instantly
-                            if silent_frames_count > 3:
+                            # Trigger after 4 frames (0.12s) of silence
+                            if silent_frames_count > 4:
                                 if len(voiced_frames) < 800: 
                                     voiced_frames.clear()
                                     silent_frames_count = 0
@@ -134,46 +153,27 @@ async def websocket_endpoint(websocket: WebSocket):
 
                                 pcm_8k = audioop.ulaw2lin(voiced_frames, 2)
                                 pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
-                                wav_io = io.BytesIO()
-                                with wave.open(wav_io, 'wb') as wf:
-                                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
-                                    wf.writeframes(pcm_16k)
-                                wav_io.seek(0)
                                 voiced_frames.clear()
                                 silent_frames_count = 0
                                 
                                 try:
-                                    # BACK TO GROQ TURBO (Fast!)
-                                    transcription = client.audio.transcriptions.create(
-                                        file=("audio.wav", wav_io.read()), 
-                                        model="whisper-large-v3-turbo", 
-                                        language="pa", 
-                                        response_format="text"
-                                    )
-                                    
-                                    user_text = transcription.strip()
+                                    # USE THE FAST SDK INSTEAD OF REST API
+                                    user_text = await asyncio.to_thread(transcribe_azure_fast, pcm_16k)
                                     user_text_lower = user_text.lower()
                                     
-                                    # BLOCK HALLUCINATIONS
-                                    if len(user_text) > 15 or len(user_text) < 2:
+                                    if len(user_text) < 1:
                                         continue
                                         
-                                    print(f"--- PATIENT SAID: '{user_text}' ---")
+                                    print(f"--- PATIENT SAID (Azure SDK): '{user_text}' ---")
                                     
                                     hang_up = False
                                     audio_to_play = None
                                     
-                                    # MASSIVE MATCH LIST
-                                    yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar", "kardo", 
-                                                 "gy", "ng", "hanji", "haanji", "han gy", "han ji", "haan ji", "haan gy",
-                                                 "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਘਾਂਜੀ", "ਘਾਂ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ"]
-                                    no_words = ["nahi", "no", "nhi", "nhii", "glti", "galti", "cancel", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
-                                    
-                                    if any(word in user_text_lower for word in yes_words):
+                                    if any(word in user_text_lower for word in ["ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਹਾਂ ਜੀ", "ਹਾਜੀ"]):
                                         print("--- MATCHED YES! ---")
                                         audio_to_play = AUDIO_CACHE["yes"]
                                         hang_up = True
-                                    elif any(word in user_text_lower for word in no_words):
+                                    elif any(word in user_text_lower for word in ["ਨਹੀਂ", "ਨਾ", "no", "nahi"]):
                                         print("--- MATCHED NO! ---")
                                         audio_to_play = AUDIO_CACHE["no"]
                                         hang_up = True
