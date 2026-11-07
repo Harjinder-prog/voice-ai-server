@@ -16,20 +16,22 @@ import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
 
-# Load keys from environment variables (Secure way)
 groq_key = os.environ.get("GROQ_API_KEY")
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 
 client = Groq(api_key=groq_key)
 
+# 1. Changed "Sat Sri Akal" to "Sa Sri Akal" spelling
+# 2. Changed "Order" to English so it pronounces it correctly
 SYSTEM_PROMPT = """You are a professional female assistant calling on behalf of Nihal Hospital.
-Keep the call very short. Confirm their medicine home-delivery order. 
-If they say yes (haan, haanji, theek hai), say EXACTLY: "ਤੁਹਾਡਾ ਆਰਡਰ ਪਲੇਸ ਕਰ ਦਿੱਤਾ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।" and then STOP TALKING. DO NOT ask the question again.
-If they say no, say EXACTLY: "ਅਸੀਂ ਤੁਹਾਡਾ ਆਰਡਰ ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।" and then STOP TALKING.
-You must respond ONLY in Punjabi (Gurmukhi script). Never repeat the question if they have already answered."""
+Keep the call very short. 
+If they say yes (haan, haanji, theek hai), reply EXACTLY with this sentence and NOTHING else: "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
+If they say no, reply EXACTLY with this sentence and NOTHING else: "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+If they are unclear, ask EXACTLY: "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+You must respond ONLY in Punjabi (Gurmukhi script) mixed with the English word Order."""
 
-GREETING_TEXT = "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 @app.get("/health")
 def health():
@@ -37,7 +39,6 @@ def health():
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
-    # 🚨 MAKE SURE THIS MATCHES YOUR CURRENT CLOUDFLARE LINK
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
@@ -98,9 +99,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
                     
-                    # Mute mic exactly while greeting plays + 1.5s echo tail
+                    # REDUCED TAIL TO 0.3s SO IT HEARS "HANJI" QUICKLY
                     duration = len(ulaw_greeting) / 8000.0
-                    ignore_audio_until = time.time() + duration + 1.5
+                    ignore_audio_until = time.time() + duration + 0.3
                     
                     await websocket.send_json({
                         "event": "playAudio",
@@ -118,7 +119,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                if len(audio_buffer) > 16000: 
+                # REDUCED BUFFER SIZE TO 8000 (1 SECOND) TO CATCH SHORT WORDS FASTER
+                if len(audio_buffer) > 8000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     pcm = audioop.ulaw2lin(audio_chunk, 2)
@@ -138,7 +140,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         user_text = transcription.strip()
                         
-                        # Ignore hallucinations and empty text
                         if len(user_text) < 2 or "thank you" in user_text.lower() or "subtitles" in user_text.lower():
                             continue
                             
@@ -151,12 +152,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                 {"role": "user", "content": user_text}
                             ],
                             max_tokens=50,
-                            temperature=0.2
+                            temperature=0.1
                         )
                         
                         ai_reply = completion.choices[0].message.content.strip()
                         if not ai_reply:
-                            ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                            ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
                             
                         print(f"AI replied: {ai_reply}")
                         
@@ -165,9 +166,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
                             
-                            # Mute mic exactly while reply plays + 1.5s echo tail
                             duration = len(ulaw_reply) / 8000.0
-                            ignore_audio_until = time.time() + duration + 1.5
+                            ignore_audio_until = time.time() + duration + 0.3
                             
                             await websocket.send_json({
                                 "event": "playAudio",
