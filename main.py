@@ -8,6 +8,7 @@ import uvicorn
 import subprocess
 import tempfile
 import asyncio
+import time
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
 from groq import Groq
@@ -17,11 +18,11 @@ app = FastAPI()
 groq_key = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=groq_key)
 
-SYSTEM_PROMPT = """You are a warm, gentle, professional female assistant calling on behalf of Nihal Hospital.
-Keep the call short. Confirm their medicine home-delivery order. 
-If they say yes, say: "ਤੁਹਾਡਾ ਆਰਡਰ ਪਲੇਸ ਕਰ ਦਿੱਤਾ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
-If they say no, say: "ਅਸੀਂ ਤੁਹਾਡਾ ਆਰਡਰ ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
-You must respond ONLY in Punjabi (Gurmukhi script). Keep replies to one short sentence."""
+SYSTEM_PROMPT = """You are a professional female assistant calling on behalf of Nihal Hospital.
+Keep the call very short. Confirm their medicine home-delivery order. 
+If they say yes, say ONLY: "ਤੁਹਾਡਾ ਆਰਡਰ ਪਲੇਸ ਕਰ ਦਿੱਤਾ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
+If they say no, say ONLY: "ਅਸੀਂ ਤੁਹਾਡਾ ਆਰਡਰ ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+You must respond ONLY in Punjabi (Gurmukhi script). Keep replies to one short sentence. DO NOT repeat yourself under any circumstances."""
 
 GREETING_TEXT = "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
@@ -40,7 +41,7 @@ async def answer(request: Request):
     return PlainTextResponse(content=xml, media_type="application/xml")
 
 async def text_to_mulaw(text):
-    # Use Google TTS instead of Edge TTS
+    # Use Google TTS in a separate thread so it doesn't block the server
     def generate_mp3():
         tts = gTTS(text=text, lang='pa', slow=False)
         mp3_data = io.BytesIO()
@@ -69,6 +70,7 @@ async def text_to_mulaw(text):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
+    ignore_audio_until = time.time()
     
     try:
         while True:
@@ -87,8 +89,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         "payload": base64_audio
                     }
                 })
+                # Ignore audio for 4 seconds while greeting plays (to prevent echo)
+                ignore_audio_until = time.time() + 4.0
                 
             elif data['event'] == 'media':
+                # If the AI is currently speaking or echoing, ignore the audio
+                if time.time() < ignore_audio_until:
+                    continue
+
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
@@ -110,7 +118,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             model="whisper-large-v3",
                             response_format="text"
                         )
-                        user_text = transcription
+                        user_text = transcription.strip()
+                        if not user_text:
+                            continue
+                            
                         print(f"Patient said: {user_text}")
                         
                         completion = client.chat.completions.create(
@@ -119,7 +130,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 {"role": "system", "content": SYSTEM_PROMPT},
                                 {"role": "user", "content": user_text}
                             ],
-                            max_tokens=150
+                            max_tokens=50
                         )
                         ai_reply = completion.choices[0].message.content
                         print(f"AI replied: {ai_reply}")
@@ -134,6 +145,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "payload": base64_reply
                             }
                         })
+                        
+                        # Ignore incoming audio for 5 seconds while the AI speaks
+                        # This stops it from hearing its own voice and repeating
+                        ignore_audio_until = time.time() + 5.0
+                        audio_buffer.clear()
+                        
                     except Exception as e:
                         print(f"Pipeline error: {e}")
             elif data['event'] == 'stop':
