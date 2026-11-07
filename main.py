@@ -22,7 +22,7 @@ If they say yes, say: "ਤੁਹਾਡਾ ਆਰਡਰ ਪਲੇਸ ਕਰ ਦ�
 If they say no, say: "ਅਸੀਂ ਤੁਹਾਡਾ ਆਰਡਰ ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
 You must respond ONLY in Punjabi (Gurmukhi script). Keep replies to one short sentence."""
 
-GREETING_TEXT = "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+GREETING_TEXT = "ਸਤਿ ਸ੍ਰੀ ਆਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 @app.get("/health")
 def health():
@@ -61,8 +61,6 @@ async def text_to_mulaw(text):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
-    stream_sid = None
-    print(">>> WEBSOCKET CONNECTED BY VOBIZ! <<<")
     
     try:
         while True:
@@ -70,14 +68,17 @@ async def websocket_endpoint(websocket: WebSocket):
             data = json.loads(message)
             
             if data['event'] == 'start':
-                stream_sid = data['start']['streamSid']
                 print("Call Connected. Sending Greeting...")
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
+                # Vobiz requires 'playAudio' event
                 await websocket.send_json({
-                    "event": "media",
-                    "streamSid": stream_sid,
-                    "media": {"payload": base64_audio}
+                    "event": "playAudio",
+                    "media": {
+                        "contentType": "audio/x-mulaw",
+                        "sampleRate": 8000,
+                        "payload": base64_audio
+                    }
                 })
                 
             elif data['event'] == 'media':
@@ -119,9 +120,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         ulaw_reply = await text_to_mulaw(ai_reply)
                         base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
                         await websocket.send_json({
-                            "event": "media",
-                            "streamSid": stream_sid,
-                            "media": {"payload": base64_reply}
+                            "event": "playAudio",
+                            "media": {
+                                "contentType": "audio/x-mulaw",
+                                "sampleRate": 8000,
+                                "payload": base64_reply
+                            }
                         })
                     except Exception as e:
                         print(f"Pipeline error: {e}")
