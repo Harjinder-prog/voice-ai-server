@@ -89,8 +89,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
                     duration = len(ulaw_greeting) / 8000.0
-                    # Ignore echo exactly while greeting plays + 0.5s tail
-                    ignore_audio_until = time.time() + duration + 0.5
+                    
+                    # Mute mic exactly while greeting plays + 2 seconds for echo tail
+                    ignore_audio_until = time.time() + duration + 2.0
                     
                     await websocket.send_json({
                         "event": "playAudio",
@@ -108,8 +109,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # Reduced to 2400 bytes (0.3 seconds) to catch "Haanji" instantly
-                if len(audio_buffer) > 2400: 
+                # Increased to 8000 bytes (1 full second) so Whisper has enough data
+                if len(audio_buffer) > 8000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     pcm = audioop.ulaw2lin(audio_chunk, 2)
@@ -131,19 +132,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         user_text = transcription.strip()
                         print(f"Patient said: {user_text}")
                         
-                        # Ignore tiny hallucinations
                         if len(user_text) < 2 or "thank you" in user_text.lower() or "subtitles" in user_text.lower():
                             continue
                             
-                        # --- BYPASSING LLM FOR EXACT TEXT ---
                         user_text_lower = user_text.lower()
-                        if any(word in user_text_lower for word in ["haan", "han", "yes", "theek", "ok", "ਹਾਂ"]):
+                        if any(word in user_text_lower for word in ["haan", "han", "yes", "theek", "ok", "ਹਾਂ", "ਹਾਂਜੀ", "ਜੀ"]):
                             ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
                         elif any(word in user_text_lower for word in ["nahi", "no", "ਨਹੀਂ", "ਨਾ"]):
                             ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
                         else:
                             ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
-                        # ------------------------------------
                             
                         print(f"AI replied: {ai_reply}")
                         
@@ -151,9 +149,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
-                            
                             duration = len(ulaw_reply) / 8000.0
-                            ignore_audio_until = time.time() + duration + 0.5
+                            
+                            # Mute mic exactly while reply plays + 2 seconds for echo tail
+                            ignore_audio_until = time.time() + duration + 2.0
                             
                             await websocket.send_json({
                                 "event": "playAudio",
