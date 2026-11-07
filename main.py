@@ -22,7 +22,7 @@ SYSTEM_PROMPT = """You are a professional female assistant calling on behalf of 
 Keep the call very short. Confirm their medicine home-delivery order. 
 If they say yes, say ONLY: "ਤੁਹਾਡਾ ਆਰਡਰ ਪਲੇਸ ਕਰ ਦਿੱਤਾ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
 If they say no, say ONLY: "ਅਸੀਂ ਤੁਹਾਡਾ ਆਰਡਰ ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
-You must respond ONLY in Punjabi (Gurmukhi script). Keep replies to one short sentence. DO NOT repeat yourself under any circumstances."""
+You must respond ONLY in Punjabi (Gurmukhi script). Keep replies to one short sentence. DO NOT repeat yourself."""
 
 GREETING_TEXT = "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
@@ -41,7 +41,6 @@ async def answer(request: Request):
     return PlainTextResponse(content=xml, media_type="application/xml")
 
 async def text_to_mulaw(text):
-    # Use Google TTS in a separate thread so it doesn't block the server
     def generate_mp3():
         tts = gTTS(text=text, lang='pa', slow=False)
         mp3_data = io.BytesIO()
@@ -57,7 +56,6 @@ async def text_to_mulaw(text):
     with tempfile.NamedTemporaryFile(suffix=".ulaw", delete=False) as f_out:
         out_path = f_out.name
         
-    # Convert MP3 to mu-law for Vobiz
     subprocess.run(["ffmpeg", "-y", "-i", in_path, "-ar", "8000", "-ac", "1", "-f", "mulaw", out_path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     with open(out_path, "rb") as f:
@@ -70,7 +68,7 @@ async def text_to_mulaw(text):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
-    ignore_audio_until = time.time()
+    ignore_audio_until = time.time() + 2.0 # Start by ignoring for 2 seconds
     
     try:
         while True:
@@ -81,6 +79,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 print("Call Connected. Sending Greeting...")
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
+                
+                # Mute the mic exactly while the greeting plays
+                duration = len(ulaw_greeting) / 8000.0
+                ignore_audio_until = time.time() + duration + 1.0
+                
                 await websocket.send_json({
                     "event": "playAudio",
                     "media": {
@@ -89,11 +92,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         "payload": base64_audio
                     }
                 })
-                # Ignore audio for 4 seconds while greeting plays (to prevent echo)
-                ignore_audio_until = time.time() + 4.0
                 
             elif data['event'] == 'media':
-                # If the AI is currently speaking or echoing, ignore the audio
                 if time.time() < ignore_audio_until:
                     continue
 
@@ -119,7 +119,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             response_format="text"
                         )
                         user_text = transcription.strip()
-                        if not user_text:
+                        
+                        # Ignore whisper hallucinations and empty text
+                        if len(user_text) < 2 or "thank you" in user_text.lower() or "subtitles" in user_text.lower():
                             continue
                             
                         print(f"Patient said: {user_text}")
@@ -132,11 +134,20 @@ async def websocket_endpoint(websocket: WebSocket):
                             ],
                             max_tokens=50
                         )
-                        ai_reply = completion.choices[0].message.content
+                        
+                        ai_reply = completion.choices[0].message.content.strip()
+                        if not ai_reply:
+                            ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                            
                         print(f"AI replied: {ai_reply}")
                         
                         ulaw_reply = await text_to_mulaw(ai_reply)
                         base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
+                        
+                        # Mute the mic exactly while the reply plays
+                        duration = len(ulaw_reply) / 8000.0
+                        ignore_audio_until = time.time() + duration + 1.0
+                        
                         await websocket.send_json({
                             "event": "playAudio",
                             "media": {
@@ -146,9 +157,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             }
                         })
                         
-                        # Ignore incoming audio for 5 seconds while the AI speaks
-                        # This stops it from hearing its own voice and repeating
-                        ignore_audio_until = time.time() + 5.0
                         audio_buffer.clear()
                         
                     except Exception as e:
