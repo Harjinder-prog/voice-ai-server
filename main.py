@@ -20,7 +20,6 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
-# Updated greeting text
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 @app.get("/health")
@@ -108,31 +107,31 @@ async def websocket_endpoint(websocket: WebSocket):
                     wav_io.seek(0)
                     
                     try:
+                        # NO PROMPT HERE! That was causing the hallucinations.
                         transcription = client.audio.transcriptions.create(
                             file=("audio.wav", wav_io.read()), 
                             model="whisper-large-v3", 
                             language="pa", 
-                            prompt="ਹਾਂਜੀ, ਨਹੀਂ, ਹਾਂ, ਨਾ, ਆਰਡਰ ਪਲੇਸ ਕਰੋ, ਠੀਕ ਹੈ, ਜੀ, ਕਰ ਦੋ", 
-                            temperature=0.0,
                             response_format="text"
                         )
                         
                         user_text = transcription.strip()
                         print(f"--- DEBUG: WHISPER HEARD: '{user_text}' ---")
                         
-                        if len(user_text) < 2 or "thank you" in user_text.lower() or "ਕੋ ਮੀ" in user_text: 
+                        if len(user_text) < 1 or "thank you" in user_text.lower() or "ਕੋ ਮੀ" in user_text: 
                             continue
                             
                         user_text_lower = user_text.lower()
                         
-                        yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ"]
+                        # MASSIVE YES LIST to catch every way Whisper hallucinates "Haanji" or "Kardo"
+                        yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "kar", "kardo", 
+                                     "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ", "ਗੀਤ"]
                         no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
                         
                         hang_up = False
                         
                         if any(word in user_text_lower for word in yes_words):
                             print("--- DEBUG: MATCHED YES! ---")
-                            # UPDATED YES REPLY with better pronunciation spelling
                             ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
                             hang_up = True
                         elif any(word in user_text_lower for word in no_words):
