@@ -20,7 +20,8 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
-GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+# UPDATED: Changed to "ਆਪਣਾ" (Apna)
+GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 @app.get("/health")
 def health():
@@ -81,7 +82,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    # Mute for greeting + 1.5s to ensure echo is completely gone
                     ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 1.5
                     await websocket.send_json({
                         "event": "playAudio",
@@ -95,7 +95,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # 2.0 second buffer (16000 bytes) to give Whisper enough audio to process
                 if len(audio_buffer) > 16000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
@@ -109,12 +108,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     wav_io.seek(0)
                     
                     try:
-                        # Added prompt and temperature to stop hallucinations
                         transcription = client.audio.transcriptions.create(
                             file=("audio.wav", wav_io.read()), 
                             model="whisper-large-v3", 
                             language="pa", 
-                            prompt="ਹਾਂਜੀ, ਨਹੀਂ, ਹਾਂ, ਨਾ, ਆਰਡਰ ਪਲੇਸ ਕਰੋ, ਠੀਕ ਹੈ", 
+                            prompt="ਹਾਂਜੀ, ਨਹੀਂ, ਹਾਂ, ਨਾ, ਆਰਡਰ ਪਲੇਸ ਕਰੋ, ਠੀਕ ਹੈ, ਜੀ, ਕਰ ਦੋ", 
                             temperature=0.0,
                             response_format="text"
                         )
@@ -122,36 +120,52 @@ async def websocket_endpoint(websocket: WebSocket):
                         user_text = transcription.strip()
                         print(f"--- DEBUG: WHISPER HEARD: '{user_text}' ---")
                         
-                        if len(user_text) < 2 or "thank you" in user_text.lower(): 
-                            print("--- DEBUG: IGNORING (Too short or hallucination) ---")
+                        if len(user_text) < 2 or "thank you" in user_text.lower() or "ਕੋ ਮੀ" in user_text: 
                             continue
                             
                         user_text_lower = user_text.lower()
-                        yes_words = ["haan", "han", "yes", "theek", "ok", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ"]
-                        no_words = ["nahi", "no", "ਨਹੀਂ", "ਨਾ"]
+                        
+                        # UPDATED YES & NO KEYWORDS
+                        yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ"]
+                        no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
+                        
+                        hang_up = False
                         
                         if any(word in user_text_lower for word in yes_words):
                             print("--- DEBUG: MATCHED YES! ---")
-                            ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
+                            # UPDATED YES REPLY
+                            ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
+                            hang_up = True
                         elif any(word in user_text_lower for word in no_words):
                             print("--- DEBUG: MATCHED NO! ---")
-                            ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+                            ai_reply = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+                            hang_up = True
                         else:
                             print("--- DEBUG: UNCLEAR. ASKING AGAIN. ---")
-                            ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                            # UPDATED UNCLEAR QUESTION
+                            ai_reply = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
                             
                         print(f"--- DEBUG: AI REPLYING WITH: '{ai_reply}' ---")
                         ulaw_reply = await text_to_mulaw(ai_reply)
                         
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
-                            # Mute for reply + 1.5s
-                            ignore_audio_until = time.time() + (len(ulaw_reply) / 8000.0) + 1.5
+                            duration = len(ulaw_reply) / 8000.0
+                            ignore_audio_until = time.time() + duration + 1.5
                             
                             await websocket.send_json({
                                 "event": "playAudio",
                                 "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_reply}
                             })
+                            
+                            # AUTO-HANGUP LOGIC
+                            if hang_up:
+                                print("--- DEBUG: HANGING UP CALL ---")
+                                # Wait for the audio to finish playing before closing
+                                await asyncio.sleep(duration + 1.0)
+                                await websocket.close()
+                                break
+                                
                         audio_buffer.clear()
                     except Exception as e: 
                         print(f"!!! PIPELINE ERROR: {e} !!!")
