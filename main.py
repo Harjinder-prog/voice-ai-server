@@ -89,9 +89,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
                     duration = len(ulaw_greeting) / 8000.0
-                    
-                    # Mute mic exactly while greeting plays + 2 seconds for echo tail
-                    ignore_audio_until = time.time() + duration + 2.0
+                    # Mute mic exactly while greeting plays + 1.5s for echo tail
+                    ignore_audio_until = time.time() + duration + 1.5
                     
                     await websocket.send_json({
                         "event": "playAudio",
@@ -109,17 +108,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # Increased to 8000 bytes (1 full second) so Whisper has enough data
-                if len(audio_buffer) > 8000: 
+                # Increased to 12000 bytes (1.5 seconds) to capture the whole word
+                if len(audio_buffer) > 12000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
-                    pcm = audioop.ulaw2lin(audio_chunk, 2)
+                    
+                    # 1. Convert mu-law to 16-bit PCM
+                    pcm_8k = audioop.ulaw2lin(audio_chunk, 2)
+                    
+                    # 2. UP-SAMPLE 8kHz to 16kHz for Whisper Accuracy!
+                    pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
+                    
                     wav_io = io.BytesIO()
                     with wave.open(wav_io, 'wb') as wf:
                         wf.setnchannels(1)
                         wf.setsampwidth(2)
-                        wf.setframerate(8000)
-                        wf.writeframes(pcm)
+                        wf.setframerate(16000) # 16kHz
+                        wf.writeframes(pcm_16k)
                     wav_io.seek(0)
                     
                     try:
@@ -132,11 +137,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         user_text = transcription.strip()
                         print(f"Patient said: {user_text}")
                         
+                        # Ignore hallucinations
                         if len(user_text) < 2 or "thank you" in user_text.lower() or "subtitles" in user_text.lower():
                             continue
                             
+                        # Broad matching for Yes and No in Punjabi and English
                         user_text_lower = user_text.lower()
-                        if any(word in user_text_lower for word in ["haan", "han", "yes", "theek", "ok", "ਹਾਂ", "ਹਾਂਜੀ", "ਜੀ"]):
+                        if any(word in user_text_lower for word in ["haan", "han", "yes", "theek", "ok", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ"]):
                             ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
                         elif any(word in user_text_lower for word in ["nahi", "no", "ਨਹੀਂ", "ਨਾ"]):
                             ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
@@ -150,9 +157,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
                             duration = len(ulaw_reply) / 8000.0
-                            
-                            # Mute mic exactly while reply plays + 2 seconds for echo tail
-                            ignore_audio_until = time.time() + duration + 2.0
+                            # Mute mic exactly while reply plays + 1.5s for echo tail
+                            ignore_audio_until = time.time() + duration + 1.5
                             
                             await websocket.send_json({
                                 "event": "playAudio",
