@@ -7,10 +7,11 @@ import audioop
 import uvicorn
 import subprocess
 import tempfile
+import asyncio
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
 from groq import Groq
-import edge_tts
+from gtts import gTTS
 
 app = FastAPI()
 groq_key = os.environ.get("GROQ_API_KEY")
@@ -22,7 +23,7 @@ If they say yes, say: "ਤੁਹਾਡਾ ਆਰਡਰ ਪਲੇਸ ਕਰ ਦ�
 If they say no, say: "ਅਸੀਂ ਤੁਹਾਡਾ ਆਰਡਰ ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
 You must respond ONLY in Punjabi (Gurmukhi script). Keep replies to one short sentence."""
 
-GREETING_TEXT = "ਸਤਿ ਸ੍ਰੀ ਆਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+GREETING_TEXT = "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ ਆਰਡਰ ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 @app.get("/health")
 def health():
@@ -39,18 +40,25 @@ async def answer(request: Request):
     return PlainTextResponse(content=xml, media_type="application/xml")
 
 async def text_to_mulaw(text):
-    communicate = edge_tts.Communicate(text, "pa-IN-VaaniNeural")
-    mp3_data = io.BytesIO()
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            mp3_data.write(chunk["data"])
-    mp3_data.seek(0)
+    # Use Google TTS instead of Edge TTS
+    def generate_mp3():
+        tts = gTTS(text=text, lang='pa', slow=False)
+        mp3_data = io.BytesIO()
+        tts.write_to_fp(mp3_data)
+        mp3_data.seek(0)
+        return mp3_data
+
+    mp3_data = await asyncio.to_thread(generate_mp3)
+
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f_in:
         f_in.write(mp3_data.read())
         in_path = f_in.name
     with tempfile.NamedTemporaryFile(suffix=".ulaw", delete=False) as f_out:
         out_path = f_out.name
+        
+    # Convert MP3 to mu-law for Vobiz
     subprocess.run(["ffmpeg", "-y", "-i", in_path, "-ar", "8000", "-ac", "1", "-f", "mulaw", out_path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
     with open(out_path, "rb") as f:
         ulaw_data = f.read()
     os.remove(in_path)
@@ -71,7 +79,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 print("Call Connected. Sending Greeting...")
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                # Vobiz requires 'playAudio' event
                 await websocket.send_json({
                     "event": "playAudio",
                     "media": {
