@@ -15,7 +15,6 @@ from groq import Groq
 import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
-
 groq_key = os.environ.get("GROQ_API_KEY")
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
@@ -29,11 +28,11 @@ def health():
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
-    # NEW CLOUDFLARE LINK
+    # USING NGROK LINK
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
-            wss://barriers-floors-situation-nylon.trycloudflare.com/ws
+            wss://eldercare-flatterer-skier.ngrok-free.dev/ws
         </Stream>
     </Response>"""
     return PlainTextResponse(content=xml, media_type="application/xml")
@@ -80,8 +79,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    # Mute mic while greeting plays + 0.3s echo tail
-                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.3
+                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.2
                     await websocket.send_json({
                         "event": "playAudio",
                         "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_audio}
@@ -92,12 +90,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # 1.0 second buffer to capture short words like "Haanji"
-                if len(audio_buffer) > 8000: 
+                if len(audio_buffer) > 4800: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     
-                    # Convert to 16kHz for Whisper
                     pcm_8k = audioop.ulaw2lin(audio_chunk, 2)
                     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                     wav_io = io.BytesIO()
@@ -112,27 +108,25 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         user_text = transcription.strip()
                         print(f"Patient said: {user_text}")
+                        
                         if len(user_text) < 2 or "thank you" in user_text.lower(): continue
                             
-                        # Use new Groq model to classify intent
-                        classify_prompt = f"User replied: '{user_text}' to 'Do you want to place the order?'. Reply YES, NO, or UNCLEAR."
-                        classification = client.chat.completions.create(
-                            model="openai/gpt-oss-20b",
-                            messages=[{"role": "user", "content": classify_prompt}],
-                            max_tokens=10, temperature=0.0
-                        )
-                        intent = classification.choices[0].message.content.strip().upper()
-                        print(f"Intent: {intent}")
+                        user_text_lower = user_text.lower()
+                        yes_words = ["haan", "han", "yes", "theek", "ok", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ"]
+                        no_words = ["nahi", "no", "ਨਹੀਂ", "ਨਾ"]
                         
-                        if "YES" in intent: ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
-                        elif "NO" in intent: ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
-                        else: ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                        if any(word in user_text_lower for word in yes_words):
+                            ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
+                        elif any(word in user_text_lower for word in no_words):
+                            ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+                        else:
+                            ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
                             
                         print(f"AI replied: {ai_reply}")
                         ulaw_reply = await text_to_mulaw(ai_reply)
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
-                            ignore_audio_until = time.time() + (len(ulaw_reply) / 8000.0) + 0.3
+                            ignore_audio_until = time.time() + (len(ulaw_reply) / 8000.0) + 0.2
                             await websocket.send_json({
                                 "event": "playAudio",
                                 "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_reply}
