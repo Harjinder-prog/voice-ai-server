@@ -15,11 +15,9 @@ from groq import Groq
 import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
-
 groq_key = os.environ.get("GROQ_API_KEY")
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
-
 client = Groq(api_key=groq_key)
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
@@ -30,11 +28,11 @@ def health():
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
-    # 🚨 CHECK THIS: Make sure this matches your current Cloudflare link!
+    # NEW CLOUDFLARE LINK
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
-            wss://asylum-powerseller-networks-effects.trycloudflare.com/ws
+            wss://decade-carlo-hugh-dresses.trycloudflare.com/ws
         </Stream>
     </Response>"""
     return PlainTextResponse(content=xml, media_type="application/xml")
@@ -44,9 +42,7 @@ def generate_azure_audio(text):
     speech_config.speech_synthesis_voice_name = "pa-IN-VaaniNeural"
     speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3)
     synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
-    
     result = synthesizer.speak_text_async(text).get()
-    
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
         return result.audio_data
     else:
@@ -55,17 +51,13 @@ def generate_azure_audio(text):
 
 async def text_to_mulaw(text):
     audio_bytes = await asyncio.to_thread(generate_azure_audio, text)
-    if not audio_bytes:
-        return None
-
+    if not audio_bytes: return None
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f_in:
         f_in.write(audio_bytes)
         in_path = f_in.name
     with tempfile.NamedTemporaryFile(suffix=".ulaw", delete=False) as f_out:
         out_path = f_out.name
-        
     subprocess.run(["ffmpeg", "-y", "-i", in_path, "-ar", "8000", "-ac", "1", "-f", "mulaw", out_path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
     with open(out_path, "rb") as f:
         ulaw_data = f.read()
     os.remove(in_path)
@@ -77,7 +69,6 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
     ignore_audio_until = time.time() + 2.0 
-    
     try:
         while True:
             message = await websocket.receive_text()
@@ -86,111 +77,64 @@ async def websocket_endpoint(websocket: WebSocket):
             if data['event'] == 'start':
                 print("Call Connected. Sending Greeting...")
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
-                
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    duration = len(ulaw_greeting) / 8000.0
-                    
-                    # Mute for exactly the duration of the greeting + 0.3s to catch echo
-                    ignore_audio_until = time.time() + duration + 0.3
-                    
+                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.3
                     await websocket.send_json({
                         "event": "playAudio",
-                        "media": {
-                            "contentType": "audio/x-mulaw",
-                            "sampleRate": 8000,
-                            "payload": base64_audio
-                        }
+                        "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_audio}
                     })
                 
             elif data['event'] == 'media':
-                if time.time() < ignore_audio_until:
-                    continue
-
+                if time.time() < ignore_audio_until: continue
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # 1.0 second buffer. This is the sweet spot to catch "Haanji"
                 if len(audio_buffer) > 8000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
-                    
-                    # Upsample to 16kHz for Whisper accuracy
                     pcm_8k = audioop.ulaw2lin(audio_chunk, 2)
                     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
-                    
                     wav_io = io.BytesIO()
                     with wave.open(wav_io, 'wb') as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(16000)
+                        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
                         wf.writeframes(pcm_16k)
                     wav_io.seek(0)
                     
                     try:
                         transcription = client.audio.transcriptions.create(
-                            file=("audio.wav", wav_io.read()),
-                            model="whisper-large-v3",
-                            language="pa", 
-                            response_format="text"
+                            file=("audio.wav", wav_io.read()), model="whisper-large-v3", language="pa", response_format="text"
                         )
                         user_text = transcription.strip()
                         print(f"Patient said: {user_text}")
-                        
-                        # Ignore hallucinations
-                        if len(user_text) < 2 or "thank you" in user_text.lower() or "subtitles" in user_text.lower():
-                            continue
+                        if len(user_text) < 2 or "thank you" in user_text.lower(): continue
                             
-                        # USE THE NEW LLM MODEL TO CLASSIFY YES/NO
-                        classify_prompt = f"""You are a classifier. The user was asked 'Do you want to place the order?' in Punjabi. The user replied: '{user_text}'. 
-                        If the user means YES (haan, haanji, theek hai, ok, yes), reply exactly 'YES'. 
-                        If the user means NO, reply exactly 'NO'. 
-                        If they are asking a question or it is unclear, reply exactly 'UNCLEAR'."""
-                        
+                        classify_prompt = f"User replied: '{user_text}' to 'Do you want to place the order?'. Reply YES, NO, or UNCLEAR."
                         classification = client.chat.completions.create(
-                            model="openai/gpt-oss-20b", # UPDATED MODEL HERE
+                            model="openai/gpt-oss-20b",
                             messages=[{"role": "user", "content": classify_prompt}],
-                            max_tokens=10,
-                            temperature=0.0
+                            max_tokens=10, temperature=0.0
                         )
                         intent = classification.choices[0].message.content.strip().upper()
-                        print(f"Intent detected: {intent}")
+                        print(f"Intent: {intent}")
                         
-                        if "YES" in intent:
-                            ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
-                        elif "NO" in intent:
-                            ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
-                        else:
-                            ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                        if "YES" in intent: ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
+                        elif "NO" in intent: ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+                        else: ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
                             
                         print(f"AI replied: {ai_reply}")
-                        
                         ulaw_reply = await text_to_mulaw(ai_reply)
-                        
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
-                            duration = len(ulaw_reply) / 8000.0
-                            
-                            # Mute while reply plays + 0.3s
-                            ignore_audio_until = time.time() + duration + 0.3
-                            
+                            ignore_audio_until = time.time() + (len(ulaw_reply) / 8000.0) + 0.3
                             await websocket.send_json({
                                 "event": "playAudio",
-                                "media": {
-                                    "contentType": "audio/x-mulaw",
-                                    "sampleRate": 8000,
-                                    "payload": base64_reply
-                                }
+                                "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_reply}
                             })
-                        
                         audio_buffer.clear()
-                        
-                    except Exception as e:
-                        print(f"Pipeline error: {e}")
-            elif data['event'] == 'stop':
-                break
-    except Exception as e:
-        print(f"WebSocket error: {e}")
+                    except Exception as e: print(f"Pipeline error: {e}")
+            elif data['event'] == 'stop': break
+    except Exception as e: print(f"WebSocket error: {e}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
