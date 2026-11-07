@@ -10,18 +10,15 @@ import tempfile
 import asyncio
 import time
 import webrtcvad
+import requests
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
-from groq import Groq
 import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
-groq_key = os.environ.get("GROQ_API_KEY")
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
-client = Groq(api_key=groq_key)
 
-# Use webrtcvad (Stable and won't crash)
 vad = webrtcvad.Vad(1) 
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
@@ -59,6 +56,23 @@ async def text_to_mulaw(text):
     os.remove(in_path)
     os.remove(out_path)
     return ulaw_data
+
+# NEW: AZURE SPEECH TO TEXT (Telephony Grade)
+def transcribe_azure(audio_bytes):
+    url = f"https://{AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=pa-IN"
+    headers = {
+        "Ocp-Apim-Subscription-Key": AZURE_SPEECH_KEY,
+        "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000"
+    }
+    try:
+        response = requests.post(url, headers=headers, data=audio_bytes)
+        result = response.json()
+        if result.get("RecognitionStatus") == "Success":
+            return result.get("DisplayText", "")
+        return ""
+    except Exception as e:
+        print(f"STT Error: {e}")
+        return ""
 
 @app.on_event("startup")
 async def startup_event():
@@ -112,7 +126,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     del audio_buffer[:240]
                     frame_pcm = audioop.ulaw2lin(frame_mulaw, 2)
                     
-                    # Check volume to ignore static/background noise
                     volume = audioop.rms(frame_pcm, 2)
                     
                     try:
@@ -127,9 +140,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # Wait for 0.18s of silence to trigger
                             if silent_frames_count > 6:
-                                # Ignore tiny blips of noise
                                 if len(voiced_frames) < 800: 
                                     voiced_frames.clear()
                                     silent_frames_count = 0
@@ -146,27 +157,20 @@ async def websocket_endpoint(websocket: WebSocket):
                                 silent_frames_count = 0
                                 
                                 try:
-                                    transcription = client.audio.transcriptions.create(
-                                        file=("audio.wav", wav_io.read()), 
-                                        model="whisper-large-v3-turbo", 
-                                        language="pa", 
-                                        response_format="text"
-                                    )
-                                    
-                                    user_text = transcription.strip()
+                                    # USE AZURE STT INSTEAD OF WHISPER
+                                    user_text = await asyncio.to_thread(transcribe_azure, wav_io.read())
                                     user_text_lower = user_text.lower()
                                     
-                                    # HALLUCINATION BLOCKER: If text is too long, ignore it.
-                                    if len(user_text) > 15 or len(user_text) < 2:
-                                        print(f"--- IGNORING NOISE: '{user_text}' ---")
+                                    if len(user_text) < 1:
                                         continue
                                         
-                                    print(f"--- PATIENT SAID: '{user_text}' ---")
+                                    print(f"--- PATIENT SAID (Azure STT): '{user_text}' ---")
                                     
                                     hang_up = False
                                     audio_to_play = None
                                     
-                                    if any(word in user_text_lower for word in ["ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਹਾਂ ਜੀ"]):
+                                    # Azure usually gets the exact Gurmukhi text
+                                    if any(word in user_text_lower for word in ["ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਹਾਂ ਜੀ", "ਹਾਜੀ"]):
                                         print("--- MATCHED YES! ---")
                                         audio_to_play = AUDIO_CACHE["yes"]
                                         hang_up = True
