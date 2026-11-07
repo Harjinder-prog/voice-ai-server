@@ -15,6 +15,7 @@ from groq import Groq
 import azure.cognitiveservices.speech as speechsdk
 
 app = FastAPI()
+
 groq_key = os.environ.get("GROQ_API_KEY")
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
@@ -32,7 +33,7 @@ async def answer(request: Request):
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
-            wss://decade-carlo-hugh-dresses.trycloudflare.com/ws
+            wss://barriers-floors-situation-nylon.trycloudflare.com/ws
         </Stream>
     </Response>"""
     return PlainTextResponse(content=xml, media_type="application/xml")
@@ -79,6 +80,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
+                    # Mute mic while greeting plays + 0.3s echo tail
                     ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.3
                     await websocket.send_json({
                         "event": "playAudio",
@@ -90,9 +92,12 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
+                # 1.0 second buffer to capture short words like "Haanji"
                 if len(audio_buffer) > 8000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
+                    
+                    # Convert to 16kHz for Whisper
                     pcm_8k = audioop.ulaw2lin(audio_chunk, 2)
                     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                     wav_io = io.BytesIO()
@@ -109,6 +114,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"Patient said: {user_text}")
                         if len(user_text) < 2 or "thank you" in user_text.lower(): continue
                             
+                        # Use new Groq model to classify intent
                         classify_prompt = f"User replied: '{user_text}' to 'Do you want to place the order?'. Reply YES, NO, or UNCLEAR."
                         classification = client.chat.completions.create(
                             model="openai/gpt-oss-20b",
