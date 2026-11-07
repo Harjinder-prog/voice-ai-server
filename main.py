@@ -21,6 +21,7 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
+# VAD Level 1 (Highly Sensitive)
 vad = webrtcvad.Vad(1) 
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
@@ -28,7 +29,6 @@ YES_TEXT = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧ
 NO_TEXT = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
 UNCLEAR_TEXT = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
-# AUDIO CACHE (For instant response)
 AUDIO_CACHE = {}
 
 @app.get("/health")
@@ -60,15 +60,14 @@ async def text_to_mulaw(text):
     os.remove(out_path)
     return ulaw_data
 
-# PRE-GENERATE AUDIO ON STARTUP
 @app.on_event("startup")
 async def startup_event():
-    print(">>> PRE-GENERATING AUDIO CACHE (Takes 5 seconds)... <<<")
+    print(">>> PRE-GENERATING AUDIO CACHE... <<<")
     AUDIO_CACHE["greeting"] = await text_to_mulaw(GREETING_TEXT)
     AUDIO_CACHE["yes"] = await text_to_mulaw(YES_TEXT)
     AUDIO_CACHE["no"] = await text_to_mulaw(NO_TEXT)
     AUDIO_CACHE["unclear"] = await text_to_mulaw(UNCLEAR_TEXT)
-    print(">>> AUDIO CACHE READY! SYSTEM IS NOW ULTRA-FAST. <<<")
+    print(">>> CACHE READY! <<<")
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
@@ -85,11 +84,8 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
     ignore_audio_until = time.time() + 2.0 
-    
     voiced_frames = bytearray()
     silent_frames_count = 0
-    
-    print(">>> WEBSOCKET CONNECTED BY VOBIZ! <<<")
     
     try:
         while True:
@@ -97,27 +93,24 @@ async def websocket_endpoint(websocket: WebSocket):
             data = json.loads(message)
             
             if data['event'] == 'start':
-                print(">>> CALL STARTED. SENDING CACHED GREETING... <<<")
                 ulaw_greeting = AUDIO_CACHE["greeting"]
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.5
+                    # Reduced echo tail to 0.3s for instant listening
+                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.3
                     await websocket.send_json({
                         "event": "playAudio",
                         "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_audio}
                     })
                 
             elif data['event'] == 'media':
-                if time.time() < ignore_audio_until: 
-                    continue
-
+                if time.time() < ignore_audio_until: continue
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
                 while len(audio_buffer) >= 240:
                     frame_mulaw = bytes(audio_buffer[:240])
                     del audio_buffer[:240]
-                    
                     frame_pcm = audioop.ulaw2lin(frame_mulaw, 2)
                     
                     try:
@@ -132,10 +125,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # Reduced to 6 frames (0.18s) for instant trigger
-                            if silent_frames_count > 6:
-                                print("--- DEBUG: VAD DETECTED END OF SPEECH ---")
-                                
+                            # REDUCED TO 4 FRAMES (0.12 seconds) FOR INSTANT TRIGGER
+                            if silent_frames_count > 4:
                                 pcm_8k = audioop.ulaw2lin(voiced_frames, 2)
                                 pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                                 wav_io = io.BytesIO()
@@ -143,26 +134,25 @@ async def websocket_endpoint(websocket: WebSocket):
                                     wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
                                     wf.writeframes(pcm_16k)
                                 wav_io.seek(0)
-                                
                                 voiced_frames.clear()
                                 silent_frames_count = 0
                                 
                                 try:
+                                    # TURBO MODEL FOR MAX SPEED
                                     transcription = client.audio.transcriptions.create(
                                         file=("audio.wav", wav_io.read()), 
-                                        model="whisper-large-v3", 
+                                        model="whisper-large-v3-turbo", 
                                         language="pa", 
                                         response_format="text"
                                     )
-                                    
                                     user_text = transcription.strip()
-                                    print(f"--- DEBUG: WHISPER HEARD: '{user_text}' ---")
                                     
-                                    if len(user_text) < 1 or any(x in user_text for x in ["ਕੋਲੋ", "ਮੀਡਿ", "ਗੀਤ", "thank you"]): 
+                                    if len(user_text) < 1 or any(x in user_text for x in ["ਕੋਲੋ", "ਮੀਡਿ", "ਗੀਤ"]): 
                                         continue
                                         
                                     user_text_lower = user_text.lower()
                                     
+                                    # MASSIVE LIST OF HALLUCINATIONS AND EXACT MATCHES
                                     yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "kar", "kardo", 
                                                  "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ", 
                                                  "ਘਾਂਜੀ", "ਘਾਂ", "ਆਨੀਂਦੀ", "ਬੱੱੁਂਕੀ", "ਦੱ"]
@@ -171,22 +161,23 @@ async def websocket_endpoint(websocket: WebSocket):
                                     hang_up = False
                                     audio_to_play = None
                                     
+                                    # NO LLM! IMMEDIATE PYTHON MATCHING
                                     if any(word in user_text_lower for word in yes_words):
-                                        print("--- DEBUG: MATCHED YES! ---")
+                                        print(f"--- MATCHED YES: '{user_text}' ---")
                                         audio_to_play = AUDIO_CACHE["yes"]
                                         hang_up = True
                                     elif any(word in user_text_lower for word in no_words):
-                                        print("--- DEBUG: MATCHED NO! ---")
+                                        print(f"--- MATCHED NO: '{user_text}' ---")
                                         audio_to_play = AUDIO_CACHE["no"]
                                         hang_up = True
                                     else:
-                                        print("--- DEBUG: UNCLEAR. ASKING AGAIN. ---")
+                                        print(f"--- UNCLEAR: '{user_text}' ---")
                                         audio_to_play = AUDIO_CACHE["unclear"]
                                         
                                     if audio_to_play:
                                         base64_reply = base64.b64encode(audio_to_play).decode('utf-8')
                                         duration = len(audio_to_play) / 8000.0
-                                        ignore_audio_until = time.time() + duration + 0.5
+                                        ignore_audio_until = time.time() + duration + 0.3
                                         
                                         await websocket.send_json({
                                             "event": "playAudio",
@@ -194,18 +185,17 @@ async def websocket_endpoint(websocket: WebSocket):
                                         })
                                         
                                         if hang_up:
-                                            print("--- DEBUG: HANGING UP CALL ---")
-                                            await asyncio.sleep(duration + 1.0)
+                                            print("--- HANGING UP CALL ---")
+                                            await asyncio.sleep(duration + 0.5)
                                             await websocket.close()
                                             return
                                 except Exception as e: 
-                                    print(f"!!! PIPELINE ERROR: {e} !!!")
+                                    print(f"Pipeline error: {e}")
                                     
             elif data['event'] == 'stop': 
-                print(">>> CALL ENDED <<<")
                 break
     except Exception as e: 
-        print(f"!!! WEBSOCKET ERROR: {e} !!!")
+        print(f"WebSocket error: {e}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
