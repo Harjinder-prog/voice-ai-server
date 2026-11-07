@@ -92,16 +92,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # 1.5 seconds buffer
-                if len(audio_buffer) > 12000: 
+                # Increased buffer to 2 seconds (16000 bytes) for better Whisper accuracy
+                if len(audio_buffer) > 16000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     
                     pcm_8k = audioop.ulaw2lin(audio_chunk, 2)
                     
-                    # VOLUME CHECK (Ignore silence/noise)
+                    # Volume check (ignore background noise)
                     volume = audioop.rms(pcm_8k, 2)
-                    if volume < 400: 
+                    if volume < 500: 
                         print(f"--- DEBUG: IGNORING SILENCE (Volume: {volume}) ---")
                         continue
                         
@@ -123,33 +123,58 @@ async def websocket_endpoint(websocket: WebSocket):
                         user_text = transcription.strip()
                         print(f"--- DEBUG: WHISPER HEARD: '{user_text}' ---")
                         
-                        # Ignore common hallucinations
+                        # Ignore clear hallucinations
                         if len(user_text) < 1 or any(x in user_text for x in ["ਕੋਲੋ", "ਮੀਡਿ", "ਗੀਤ", "thank you"]): 
                             continue
                             
-                        # AI INTENT CLASSIFIER
-                        classify_prompt = f"You are an AI classifier. The user was asked 'Do you want to place the order?'. The user replied: '{user_text}'. If the reply means YES (haan, haanji, theek hai, ok, yes, kardo, kar do), reply EXACTLY with the word: YES. If the reply means NO (nahi, no, galti se, cancel), reply EXACTLY with the word: NO. If it is unclear, reply EXACTLY with: UNCLEAR."
+                        user_text_lower = user_text.lower()
                         
-                        classification = client.chat.completions.create(
-                            model="openai/gpt-oss-20b",
-                            messages=[{"role": "user", "content": classify_prompt}],
-                            max_tokens=5,
-                            temperature=0.0
-                        )
-                        
-                        intent = classification.choices[0].message.content.strip().upper()
-                        print(f"--- DEBUG: AI INTENT: {intent} ---")
+                        # MASSIVE YES & NO LISTS (Phonetic & Direct)
+                        yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "kar", "kardo", 
+                                     "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ", 
+                                     "ਘਾਂਜੀ", "ਘਾਂ", "ਦੱ", "ਹਾਂ ਜੀ"]
+                        no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
                         
                         hang_up = False
+                        intent_matched = False
                         
-                        if "YES" in intent:
+                        # Step 1: Try Python matching first (Fastest)
+                        if any(word in user_text_lower for word in yes_words):
+                            print("--- DEBUG: PYTHON MATCHED YES! ---")
+                            intent_matched = True
                             ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
                             hang_up = True
-                        elif "NO" in intent:
+                        elif any(word in user_text_lower for word in no_words):
+                            print("--- DEBUG: PYTHON MATCHED NO! ---")
+                            intent_matched = True
                             ai_reply = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
                             hang_up = True
+                            
+                        # Step 2: If Python fails, ask the LLM
+                        if not intent_matched:
+                            print("--- DEBUG: ASKING LLM CLASSIFIER ---")
+                            classify_prompt = f"User was asked 'Do you want to place the order?' in Punjabi. User replied: '{user_text}'. Does this mean YES, NO, or UNCLEAR? Reply with exactly one word."
+                            
+                            classification = client.chat.completions.create(
+                                model="llama-3.1-8b-instant",
+                                messages=[{"role": "user", "content": classify_prompt}],
+                                max_tokens=5,
+                                temperature=0.0
+                            )
+                            
+                            intent = classification.choices[0].message.content.strip().upper()
+                            print(f"--- DEBUG: LLM INTENT: '{intent}' ---")
+                            
+                            if "YES" in intent:
+                                ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
+                                hang_up = True
+                            elif "NO" in intent:
+                                ai_reply = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+                                hang_up = True
+                            else:
+                                ai_reply = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
                         else:
-                            ai_reply = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                            pass
                             
                         print(f"--- DEBUG: AI REPLYING WITH: '{ai_reply}' ---")
                         ulaw_reply = await text_to_mulaw(ai_reply)
