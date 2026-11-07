@@ -45,9 +45,7 @@ def generate_azure_audio(text):
     result = synthesizer.speak_text_async(text).get()
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
         return result.audio_data
-    else:
-        print(f"!!! AZURE TTS ERROR: {result.reason} !!!")
-        return None
+    return None
 
 async def text_to_mulaw(text):
     audio_bytes = await asyncio.to_thread(generate_azure_audio, text)
@@ -94,11 +92,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                if len(audio_buffer) > 16000: 
+                # 1.5 seconds buffer
+                if len(audio_buffer) > 12000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     
                     pcm_8k = audioop.ulaw2lin(audio_chunk, 2)
+                    
+                    # VOLUME CHECK (Ignore silence/noise)
+                    volume = audioop.rms(pcm_8k, 2)
+                    if volume < 400: 
+                        print(f"--- DEBUG: IGNORING SILENCE (Volume: {volume}) ---")
+                        continue
+                        
                     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                     wav_io = io.BytesIO()
                     with wave.open(wav_io, 'wb') as wf:
@@ -107,7 +113,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     wav_io.seek(0)
                     
                     try:
-                        # NO PROMPT HERE! That was causing the hallucinations.
                         transcription = client.audio.transcriptions.create(
                             file=("audio.wav", wav_io.read()), 
                             model="whisper-large-v3", 
@@ -118,28 +123,32 @@ async def websocket_endpoint(websocket: WebSocket):
                         user_text = transcription.strip()
                         print(f"--- DEBUG: WHISPER HEARD: '{user_text}' ---")
                         
-                        if len(user_text) < 1 or "thank you" in user_text.lower() or "ਕੋ ਮੀ" in user_text: 
+                        # Ignore common hallucinations
+                        if len(user_text) < 1 or any(x in user_text for x in ["ਕੋਲੋ", "ਮੀਡਿ", "ਗੀਤ", "thank you"]): 
                             continue
                             
-                        user_text_lower = user_text.lower()
+                        # AI INTENT CLASSIFIER
+                        classify_prompt = f"You are an AI classifier. The user was asked 'Do you want to place the order?'. The user replied: '{user_text}'. If the reply means YES (haan, haanji, theek hai, ok, yes, kardo, kar do), reply EXACTLY with the word: YES. If the reply means NO (nahi, no, galti se, cancel), reply EXACTLY with the word: NO. If it is unclear, reply EXACTLY with: UNCLEAR."
                         
-                        # MASSIVE YES LIST to catch every way Whisper hallucinates "Haanji" or "Kardo"
-                        yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "kar", "kardo", 
-                                     "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ", "ਗੀਤ"]
-                        no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
+                        classification = client.chat.completions.create(
+                            model="openai/gpt-oss-20b",
+                            messages=[{"role": "user", "content": classify_prompt}],
+                            max_tokens=5,
+                            temperature=0.0
+                        )
+                        
+                        intent = classification.choices[0].message.content.strip().upper()
+                        print(f"--- DEBUG: AI INTENT: {intent} ---")
                         
                         hang_up = False
                         
-                        if any(word in user_text_lower for word in yes_words):
-                            print("--- DEBUG: MATCHED YES! ---")
+                        if "YES" in intent:
                             ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
                             hang_up = True
-                        elif any(word in user_text_lower for word in no_words):
-                            print("--- DEBUG: MATCHED NO! ---")
+                        elif "NO" in intent:
                             ai_reply = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
                             hang_up = True
                         else:
-                            print("--- DEBUG: UNCLEAR. ASKING AGAIN. ---")
                             ai_reply = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
                             
                         print(f"--- DEBUG: AI REPLYING WITH: '{ai_reply}' ---")
