@@ -20,7 +20,7 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
-# UPDATED: Changed to "ਆਪਣਾ" (Apna)
+# Updated greeting text
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
 @app.get("/health")
@@ -125,7 +125,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             
                         user_text_lower = user_text.lower()
                         
-                        # UPDATED YES & NO KEYWORDS
                         yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ"]
                         no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
                         
@@ -133,7 +132,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         if any(word in user_text_lower for word in yes_words):
                             print("--- DEBUG: MATCHED YES! ---")
-                            # UPDATED YES REPLY
+                            # UPDATED YES REPLY with better pronunciation spelling
                             ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
                             hang_up = True
                         elif any(word in user_text_lower for word in no_words):
@@ -142,7 +141,6 @@ async def websocket_endpoint(websocket: WebSocket):
                             hang_up = True
                         else:
                             print("--- DEBUG: UNCLEAR. ASKING AGAIN. ---")
-                            # UPDATED UNCLEAR QUESTION
                             ai_reply = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
                             
                         print(f"--- DEBUG: AI REPLYING WITH: '{ai_reply}' ---")
@@ -158,10 +156,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_reply}
                             })
                             
-                            # AUTO-HANGUP LOGIC
                             if hang_up:
                                 print("--- DEBUG: HANGING UP CALL ---")
-                                # Wait for the audio to finish playing before closing
                                 await asyncio.sleep(duration + 1.0)
                                 await websocket.close()
                                 break
