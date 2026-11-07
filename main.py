@@ -9,8 +9,7 @@ import subprocess
 import tempfile
 import asyncio
 import time
-import numpy as np
-import onnxruntime as ort
+import webrtcvad
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
 from groq import Groq
@@ -22,14 +21,8 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
-# Load Silero VAD Model
-print(">>> LOADING SILERO VAD MODEL... <<<")
-# We download the ONNX model directly to memory to avoid file path issues
-import urllib.request
-model_url = "https://github.com/snakers4/silero-vad/raw/master/files/silero_vad.onnx"
-urllib.request.urlretrieve(model_url, "silero_vad.onnx")
-ort_session = ort.InferenceSession("silero_vad.onnx")
-print(">>> SILERO VAD LOADED! <<<")
+# Use webrtcvad (Stable and won't crash)
+vad = webrtcvad.Vad(1) 
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 YES_TEXT = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
@@ -103,7 +96,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 ulaw_greeting = AUDIO_CACHE["greeting"]
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.3
+                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.5
                     await websocket.send_json({
                         "event": "playAudio",
                         "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_audio}
@@ -119,23 +112,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     del audio_buffer[:240]
                     frame_pcm = audioop.ulaw2lin(frame_mulaw, 2)
                     
-                    # Silero VAD needs float32 audio normalized between -1 and 1
-                    frame_np = np.frombuffer(frame_pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                    # Check volume to ignore static/background noise
+                    volume = audioop.rms(frame_pcm, 2)
                     
                     try:
-                        # Silero VAD Inference (expects 16kHz, but we'll feed 8kHz for now as it's robust)
-                        # For perfect accuracy, we should upsample to 16k, but 8k works decently with Silero
-                        ort_inputs = {
-                            ort_session.get_inputs()[0].name: np.expand_dims(frame_np, axis=0),
-                            ort_session.get_inputs()[1].name: np.array([8000], dtype=np.int64),
-                            ort_session.get_inputs()[2].name: np.zeros((2, 1, 128), dtype=np.float32)
-                        }
-                        out, _ = ort_session.run(None, ort_inputs)
-                        is_speech = out[0][0] > 0.5
-                    except Exception as e:
-                        # Fallback if Silero fails on dimensions
-                        volume = audioop.rms(frame_pcm, 2)
-                        is_speech = volume > 500
+                        is_speech = vad.is_speech(frame_pcm, 8000) and volume > 300
+                    except Exception:
+                        is_speech = False
                     
                     if is_speech:
                         voiced_frames.extend(frame_mulaw)
@@ -144,10 +127,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # 0.2 seconds of silence triggers processing
+                            # Wait for 0.18s of silence to trigger
                             if silent_frames_count > 6:
-                                # Minimum speech length check (ignore tiny noise blips)
-                                if len(voiced_frames) < 800: # less than 0.1s of audio
+                                # Ignore tiny blips of noise
+                                if len(voiced_frames) < 800: 
                                     voiced_frames.clear()
                                     silent_frames_count = 0
                                     continue
@@ -173,14 +156,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                     user_text = transcription.strip()
                                     user_text_lower = user_text.lower()
                                     
-                                    # HALLUCINATION FILTER: If the text is longer than 20 chars, it's a hallucination
-                                    if len(user_text) > 20 or len(user_text) < 2:
-                                        print(f"--- IGNORING HALLUCINATION: '{user_text}' ---")
+                                    # HALLUCINATION BLOCKER: If text is too long, ignore it.
+                                    if len(user_text) > 15 or len(user_text) < 2:
+                                        print(f"--- IGNORING NOISE: '{user_text}' ---")
                                         continue
                                         
                                     print(f"--- PATIENT SAID: '{user_text}' ---")
                                     
-                                    # Strict exact matching
                                     hang_up = False
                                     audio_to_play = None
                                     
@@ -199,7 +181,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     if audio_to_play:
                                         base64_reply = base64.b64encode(audio_to_play).decode('utf-8')
                                         duration = len(audio_to_play) / 8000.0
-                                        ignore_audio_until = time.time() + duration + 0.3
+                                        ignore_audio_until = time.time() + duration + 0.5
                                         
                                         await websocket.send_json({
                                             "event": "playAudio",
