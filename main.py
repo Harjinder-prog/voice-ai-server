@@ -28,7 +28,7 @@ def health():
 
 @app.api_route("/answer", methods=["GET", "POST"])
 async def answer(request: Request):
-    # USING NGROK LINK
+    # MAKE SURE THIS IS YOUR CURRENT NGROK LINK
     xml = """<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000">
@@ -46,7 +46,7 @@ def generate_azure_audio(text):
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
         return result.audio_data
     else:
-        print(f"Azure TTS Error: {result.reason}")
+        print(f"!!! AZURE TTS ERROR: {result.reason} !!!")
         return None
 
 async def text_to_mulaw(text):
@@ -69,28 +69,34 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
     ignore_audio_until = time.time() + 2.0 
+    print(">>> WEBSOCKET CONNECTED BY VOBIZ! <<<")
+    
     try:
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
             
             if data['event'] == 'start':
-                print("Call Connected. Sending Greeting...")
+                print(">>> CALL STARTED. SENDING GREETING... <<<")
                 ulaw_greeting = await text_to_mulaw(GREETING_TEXT)
                 if ulaw_greeting:
                     base64_audio = base64.b64encode(ulaw_greeting).decode('utf-8')
-                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 0.2
+                    # Mute for greeting + 1.5s to ensure echo is completely gone
+                    ignore_audio_until = time.time() + (len(ulaw_greeting) / 8000.0) + 1.5
                     await websocket.send_json({
                         "event": "playAudio",
                         "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_audio}
                     })
                 
             elif data['event'] == 'media':
-                if time.time() < ignore_audio_until: continue
+                if time.time() < ignore_audio_until: 
+                    continue
+
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                if len(audio_buffer) > 4800: 
+                # 2.0 second buffer (16000 bytes) to give Whisper enough audio to process
+                if len(audio_buffer) > 16000: 
                     audio_chunk = bytes(audio_buffer)
                     audio_buffer.clear()
                     
@@ -103,38 +109,57 @@ async def websocket_endpoint(websocket: WebSocket):
                     wav_io.seek(0)
                     
                     try:
+                        # Added prompt and temperature to stop hallucinations
                         transcription = client.audio.transcriptions.create(
-                            file=("audio.wav", wav_io.read()), model="whisper-large-v3", language="pa", response_format="text"
+                            file=("audio.wav", wav_io.read()), 
+                            model="whisper-large-v3", 
+                            language="pa", 
+                            prompt="ਹਾਂਜੀ, ਨਹੀਂ, ਹਾਂ, ਨਾ, ਆਰਡਰ ਪਲੇਸ ਕਰੋ, ਠੀਕ ਹੈ", 
+                            temperature=0.0,
+                            response_format="text"
                         )
-                        user_text = transcription.strip()
-                        print(f"Patient said: {user_text}")
                         
-                        if len(user_text) < 2 or "thank you" in user_text.lower(): continue
+                        user_text = transcription.strip()
+                        print(f"--- DEBUG: WHISPER HEARD: '{user_text}' ---")
+                        
+                        if len(user_text) < 2 or "thank you" in user_text.lower(): 
+                            print("--- DEBUG: IGNORING (Too short or hallucination) ---")
+                            continue
                             
                         user_text_lower = user_text.lower()
-                        yes_words = ["haan", "han", "yes", "theek", "ok", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ"]
+                        yes_words = ["haan", "han", "yes", "theek", "ok", "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ"]
                         no_words = ["nahi", "no", "ਨਹੀਂ", "ਨਾ"]
                         
                         if any(word in user_text_lower for word in yes_words):
+                            print("--- DEBUG: MATCHED YES! ---")
                             ai_reply = "ਅਪਣਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ।"
                         elif any(word in user_text_lower for word in no_words):
+                            print("--- DEBUG: MATCHED NO! ---")
                             ai_reply = "ਅਸੀਂ ਅਪਣਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
                         else:
+                            print("--- DEBUG: UNCLEAR. ASKING AGAIN. ---")
                             ai_reply = "ਕੀ ਤੁਸੀਂ ਇਹ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
                             
-                        print(f"AI replied: {ai_reply}")
+                        print(f"--- DEBUG: AI REPLYING WITH: '{ai_reply}' ---")
                         ulaw_reply = await text_to_mulaw(ai_reply)
+                        
                         if ulaw_reply:
                             base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
-                            ignore_audio_until = time.time() + (len(ulaw_reply) / 8000.0) + 0.2
+                            # Mute for reply + 1.5s
+                            ignore_audio_until = time.time() + (len(ulaw_reply) / 8000.0) + 1.5
+                            
                             await websocket.send_json({
                                 "event": "playAudio",
                                 "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_reply}
                             })
                         audio_buffer.clear()
-                    except Exception as e: print(f"Pipeline error: {e}")
-            elif data['event'] == 'stop': break
-    except Exception as e: print(f"WebSocket error: {e}")
+                    except Exception as e: 
+                        print(f"!!! PIPELINE ERROR: {e} !!!")
+            elif data['event'] == 'stop': 
+                print(">>> CALL ENDED <<<")
+                break
+    except Exception as e: 
+        print(f"!!! WEBSOCKET ERROR: {e} !!!")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
