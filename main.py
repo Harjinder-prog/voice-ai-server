@@ -21,8 +21,7 @@ AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
 
-# Initialize VAD (Voice Activity Detection)
-vad = webrtcvad.Vad(2) # 2 is moderately aggressive at filtering noise
+vad = webrtcvad.Vad(2) 
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
@@ -71,7 +70,6 @@ async def websocket_endpoint(websocket: WebSocket):
     audio_buffer = bytearray()
     ignore_audio_until = time.time() + 2.0 
     
-    # VAD Variables
     voiced_frames = bytearray()
     silent_frames_count = 0
     
@@ -100,26 +98,32 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # Process in 30ms frames for VAD (240 bytes = 30ms at 8kHz mu-law)
+                # Process in 30ms frames (240 bytes)
                 while len(audio_buffer) >= 240:
-                    frame = bytes(audio_buffer[:240])
+                    frame_mulaw = bytes(audio_buffer[:240])
                     del audio_buffer[:240]
                     
-                    # Check if this frame has voice
-                    is_speech = vad.is_speech(frame, 8000)
+                    # FIX: Convert mu-law to PCM 16-bit BEFORE sending to VAD
+                    frame_pcm = audioop.ulaw2lin(frame_mulaw, 2)
+                    
+                    try:
+                        is_speech = vad.is_speech(frame_pcm, 8000)
+                    except Exception as e:
+                        print(f"VAD Error: {e}")
+                        is_speech = False
                     
                     if is_speech:
-                        voiced_frames.extend(frame)
+                        voiced_frames.extend(frame_mulaw)
                         silent_frames_count = 0
                     else:
-                        # If we were collecting speech and hit silence, we might be done
                         if len(voiced_frames) > 0:
                             silent_frames_count += 1
                             
-                            # If silent for 0.5 seconds (approx 16 frames), process the voice
+                            # If silent for ~0.5s (16 frames), we assume they stopped talking
                             if silent_frames_count > 16:
                                 print("--- DEBUG: VAD DETECTED END OF SPEECH ---")
                                 
+                                # Convert the collected mu-law frames to 16kHz WAV
                                 pcm_8k = audioop.ulaw2lin(voiced_frames, 2)
                                 pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                                 wav_io = io.BytesIO()
@@ -128,7 +132,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                     wf.writeframes(pcm_16k)
                                 wav_io.seek(0)
                                 
-                                # Reset VAD buffers
                                 voiced_frames.clear()
                                 silent_frames_count = 0
                                 
@@ -181,7 +184,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                             print("--- DEBUG: HANGING UP CALL ---")
                                             await asyncio.sleep(duration + 1.0)
                                             await websocket.close()
-                                            return # Break out completely
+                                            return
                                 except Exception as e: 
                                     print(f"!!! PIPELINE ERROR: {e} !!!")
                                     
