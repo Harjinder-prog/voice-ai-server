@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import asyncio
 import time
+import webrtcvad
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import PlainTextResponse
 from groq import Groq
@@ -19,6 +20,9 @@ groq_key = os.environ.get("GROQ_API_KEY")
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY")
 AZURE_REGION = os.environ.get("AZURE_REGION", "centralindia")
 client = Groq(api_key=groq_key)
+
+# Initialize VAD (Voice Activity Detection)
+vad = webrtcvad.Vad(2) # 2 is moderately aggressive at filtering noise
 
 GREETING_TEXT = "ਸਾ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਮੈਂ ਨਿਹਾਲ ਹਸਪਤਾਲ ਤੋਂ ਗੱਲ ਕਰ ਰਹੀ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
 
@@ -66,6 +70,11 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     audio_buffer = bytearray()
     ignore_audio_until = time.time() + 2.0 
+    
+    # VAD Variables
+    voiced_frames = bytearray()
+    silent_frames_count = 0
+    
     print(">>> WEBSOCKET CONNECTED BY VOBIZ! <<<")
     
     try:
@@ -91,107 +100,91 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload = base64.b64decode(data['media']['payload'])
                 audio_buffer.extend(payload)
                 
-                # Reduced to 1.0 seconds (8000 bytes) for INSTANT response
-                if len(audio_buffer) > 8000: 
-                    audio_chunk = bytes(audio_buffer)
-                    audio_buffer.clear()
+                # Process in 30ms frames for VAD (240 bytes = 30ms at 8kHz mu-law)
+                while len(audio_buffer) >= 240:
+                    frame = bytes(audio_buffer[:240])
+                    del audio_buffer[:240]
                     
-                    pcm_8k = audioop.ulaw2lin(audio_chunk, 2)
+                    # Check if this frame has voice
+                    is_speech = vad.is_speech(frame, 8000)
                     
-                    volume = audioop.rms(pcm_8k, 2)
-                    if volume < 300: 
-                        print(f"--- DEBUG: IGNORING SILENCE (Volume: {volume}) ---")
-                        continue
-                        
-                    pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
-                    wav_io = io.BytesIO()
-                    with wave.open(wav_io, 'wb') as wf:
-                        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
-                        wf.writeframes(pcm_16k)
-                    wav_io.seek(0)
-                    
-                    try:
-                        transcription = client.audio.transcriptions.create(
-                            file=("audio.wav", wav_io.read()), 
-                            model="whisper-large-v3", 
-                            language="pa", 
-                            response_format="text"
-                        )
-                        
-                        user_text = transcription.strip()
-                        print(f"--- DEBUG: WHISPER HEARD: '{user_text}' ---")
-                        
-                        if len(user_text) < 1 or any(x in user_text for x in ["ਕੋਲੋ", "ਮੀਡਿ", "ਗੀਤ", "thank you"]): 
-                            continue
+                    if is_speech:
+                        voiced_frames.extend(frame)
+                        silent_frames_count = 0
+                    else:
+                        # If we were collecting speech and hit silence, we might be done
+                        if len(voiced_frames) > 0:
+                            silent_frames_count += 1
                             
-                        user_text_lower = user_text.lower()
-                        
-                        # MASSIVE YES LIST (Includes hallucinations like ਆਨੀਂਦੀ)
-                        yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "kar", "kardo", 
-                                     "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ", 
-                                     "ਘਾਂਜੀ", "ਘਾਂ", "ਆਨੀਂਦੀ", "ਬੱੱੁਂਕੀ", "ਦੱ"]
-                        no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
-                        
-                        hang_up = False
-                        intent_matched = False
-                        
-                        if any(word in user_text_lower for word in yes_words):
-                            print("--- DEBUG: PYTHON MATCHED YES! ---")
-                            intent_matched = True
-                            ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
-                            hang_up = True
-                        elif any(word in user_text_lower for word in no_words):
-                            print("--- DEBUG: PYTHON MATCHED NO! ---")
-                            intent_matched = True
-                            ai_reply = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
-                            hang_up = True
-                            
-                        # Fallback to LLM (Fixed Model)
-                        if not intent_matched:
-                            print("--- DEBUG: ASKING LLM CLASSIFIER ---")
-                            classify_prompt = f"User was asked 'Do you want to place the order?' in Punjabi. User replied: '{user_text}'. Does this mean YES, NO, or UNCLEAR? Reply with exactly one word."
-                            
-                            classification = client.chat.completions.create(
-                                model="openai/gpt-oss-20b", # FIXED MODEL
-                                messages=[{"role": "user", "content": classify_prompt}],
-                                max_tokens=5,
-                                temperature=0.0
-                            )
-                            
-                            intent = classification.choices[0].message.content.strip().upper()
-                            print(f"--- DEBUG: LLM INTENT: '{intent}' ---")
-                            
-                            if "YES" in intent:
-                                ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
-                                hang_up = True
-                            elif "NO" in intent:
-                                ai_reply = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
-                                hang_up = True
-                            else:
-                                ai_reply = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
-                            
-                        print(f"--- DEBUG: AI REPLYING WITH: '{ai_reply}' ---")
-                        ulaw_reply = await text_to_mulaw(ai_reply)
-                        
-                        if ulaw_reply:
-                            base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
-                            duration = len(ulaw_reply) / 8000.0
-                            ignore_audio_until = time.time() + duration + 1.5
-                            
-                            await websocket.send_json({
-                                "event": "playAudio",
-                                "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_reply}
-                            })
-                            
-                            if hang_up:
-                                print("--- DEBUG: HANGING UP CALL ---")
-                                await asyncio.sleep(duration + 1.0)
-                                await websocket.close()
-                                break
+                            # If silent for 0.5 seconds (approx 16 frames), process the voice
+                            if silent_frames_count > 16:
+                                print("--- DEBUG: VAD DETECTED END OF SPEECH ---")
                                 
-                        audio_buffer.clear()
-                    except Exception as e: 
-                        print(f"!!! PIPELINE ERROR: {e} !!!")
+                                pcm_8k = audioop.ulaw2lin(voiced_frames, 2)
+                                pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
+                                wav_io = io.BytesIO()
+                                with wave.open(wav_io, 'wb') as wf:
+                                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(16000)
+                                    wf.writeframes(pcm_16k)
+                                wav_io.seek(0)
+                                
+                                # Reset VAD buffers
+                                voiced_frames.clear()
+                                silent_frames_count = 0
+                                
+                                try:
+                                    transcription = client.audio.transcriptions.create(
+                                        file=("audio.wav", wav_io.read()), 
+                                        model="whisper-large-v3", 
+                                        language="pa", 
+                                        response_format="text"
+                                    )
+                                    
+                                    user_text = transcription.strip()
+                                    print(f"--- DEBUG: WHISPER HEARD: '{user_text}' ---")
+                                    
+                                    if len(user_text) < 1 or any(x in user_text for x in ["ਕੋਲੋ", "ਮੀਡਿ", "ਗੀਤ", "thank you"]): 
+                                        continue
+                                        
+                                    user_text_lower = user_text.lower()
+                                    
+                                    yes_words = ["haan", "han", "yes", "theek", "ok", "ji", "krdo", "kar do", "kar", "kardo", 
+                                                 "ਹਾਂ", "ਜੀ", "ਠੀਕ", "ਹਾਂਜੀ", "ਹਾਂ ਜੀ", "ਹਾਜੀ", "ਕਰ ਦੋ", "ਕਰ", "ਕਰਦੀ", "ਕਰਾਂ", 
+                                                 "ਘਾਂਜੀ", "ਘਾਂ", "ਆਨੀਂਦੀ", "ਬੱੱੁਂਕੀ", "ਦੱ"]
+                                    no_words = ["nahi", "no", "nhi", "nhii", "glti naal", "galti se", "ਨਹੀਂ", "ਨਾ", "ਗਲਤੀ ਨਾਲ"]
+                                    
+                                    hang_up = False
+                                    
+                                    if any(word in user_text_lower for word in yes_words):
+                                        ai_reply = "ਤੁਹਾਡਾ Order ਪਲੇਸ ਹੋ ਗਿਆ ਹੈ। ਧੰਨਵਾਦ, ਤੁਹਾਡਾ ਦਿਨ ਸ਼ੁਭ ਹੋਵੇ।"
+                                        hang_up = True
+                                    elif any(word in user_text_lower for word in no_words):
+                                        ai_reply = "ਅਸੀਂ ਤੁਹਾਡਾ Order ਅੱਗੇ ਨਹੀਂ ਭੇਜ ਰਹੇ। ਧੰਨਵਾਦ।"
+                                        hang_up = True
+                                    else:
+                                        ai_reply = "ਕੀ ਤੁਸੀਂ ਆਪਣਾ Order ਪਲੇਸ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?"
+                                        
+                                    print(f"--- DEBUG: AI REPLYING WITH: '{ai_reply}' ---")
+                                    ulaw_reply = await text_to_mulaw(ai_reply)
+                                    
+                                    if ulaw_reply:
+                                        base64_reply = base64.b64encode(ulaw_reply).decode('utf-8')
+                                        duration = len(ulaw_reply) / 8000.0
+                                        ignore_audio_until = time.time() + duration + 1.0
+                                        
+                                        await websocket.send_json({
+                                            "event": "playAudio",
+                                            "media": {"contentType": "audio/x-mulaw", "sampleRate": 8000, "payload": base64_reply}
+                                        })
+                                        
+                                        if hang_up:
+                                            print("--- DEBUG: HANGING UP CALL ---")
+                                            await asyncio.sleep(duration + 1.0)
+                                            await websocket.close()
+                                            return # Break out completely
+                                except Exception as e: 
+                                    print(f"!!! PIPELINE ERROR: {e} !!!")
+                                    
             elif data['event'] == 'stop': 
                 print(">>> CALL ENDED <<<")
                 break
